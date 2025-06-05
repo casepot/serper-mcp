@@ -1,12 +1,13 @@
+import asyncio
 import http.client
 import json
 import os
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, Union
 
 from fastmcp import FastMCP, Context
 
 # --- Constants ---
-SERPER_SEARCH_HOST = "google.serper.dev"
+SERPER_GOOGLE_SEARCH_HOST = "google.serper.dev"
 SERPER_SCRAPE_HOST = "scrape.serper.dev"
 SERPER_API_KEY_ENV_VAR = "SERPER_API_KEY"
 
@@ -102,7 +103,6 @@ def query_serper_api(
 ) -> Dict[str, Any]:
     """
     Queries the Serper.dev Search API (google.serper.dev for /search, /news, /scholar).
-    (Docstring adapted from user provided code)
     """
     if search_endpoint not in ["search", "news", "scholar"]:
         raise SerperApiClientError(
@@ -115,7 +115,6 @@ def query_serper_api(
     if num_results is not None:
         payload["num"] = num_results
     # Default autocorrect to False if not specified, otherwise use the provided value.
-    # This matches the behavior in the user's original `google_search_tool`
     payload["autocorrect"] = False if autocorrect is None else autocorrect
     
     if time_period_filter is not None:
@@ -124,14 +123,12 @@ def query_serper_api(
         payload["page"] = page_number
     
     return _make_serper_request(
-        host=SERPER_SEARCH_HOST,
+        host=SERPER_GOOGLE_SEARCH_HOST,
         path=f"/{search_endpoint}",
         payload=payload,
         api_key=api_key
     )
 
-# Note: scrape_serper_url and its related tool are not part of the requested MCP server tools,
-# but the function is kept here as it was part of the provided client code.
 def scrape_serper_url(
     url_to_scrape: str,
     api_key: Optional[str] = None,
@@ -139,7 +136,6 @@ def scrape_serper_url(
 ) -> Dict[str, Any]:
     """
     Scrapes a webpage using the Serper.dev Scrape API (scrape.serper.dev).
-    (Docstring adapted from user provided code)
     """
     payload: Dict[str, Union[str, bool]] = {
         "url": url_to_scrape,
@@ -154,7 +150,7 @@ def scrape_serper_url(
     )
 
 # --- FastMCP Server Definition ---
-mcp = FastMCP(
+mcp: FastMCP = FastMCP(
     name="SerperDevMCPServer",
     instructions="""This server provides tools to interact with Serper.dev's Google Search, Google News, and Google Scholar APIs.
 It relies on the SERPER_API_KEY environment variable being set on the server machine for authentication with Serper.dev.
@@ -167,7 +163,7 @@ Tool annotations like 'readOnlyHint': true, 'idempotentHint': true, 'openWorldHi
 
 @mcp.tool()
 async def google_search(
-    ctx: Context, # Moved ctx to be before optional arguments
+    ctx: Context,
     query: str,
     location: Optional[str] = None,
     num_results: Optional[int] = None,
@@ -209,7 +205,7 @@ async def google_search(
         await ctx.error(f"Serper API error in google_search for query '{query}': {e}")
         raise
     except Exception as e:
-        await ctx.error(f"Unexpected error in google_search for query '{query}': {e}") # Removed exc_info
+        await ctx.error(f"Unexpected error in google_search for query '{query}': {e}")
         # Re-raise as SerperApiClientError to ensure consistent error type from this layer if not already one
         if not isinstance(e, SerperApiClientError):
             raise SerperApiClientError(f"An unexpected error occurred in google_search tool: {e}") from e
@@ -217,7 +213,7 @@ async def google_search(
 
 @mcp.tool()
 async def news_search(
-    ctx: Context, # Moved ctx to be before optional arguments
+    ctx: Context,
     query: str,
     location: Optional[str] = None,
     num_results: Optional[int] = None,
@@ -259,14 +255,14 @@ async def news_search(
         await ctx.error(f"Serper API error in news_search for query '{query}': {e}")
         raise
     except Exception as e:
-        await ctx.error(f"Unexpected error in news_search for query '{query}': {e}") # Removed exc_info
+        await ctx.error(f"Unexpected error in news_search for query '{query}': {e}")
         if not isinstance(e, SerperApiClientError):
             raise SerperApiClientError(f"An unexpected error occurred in news_search tool: {e}") from e
         raise
 
 @mcp.tool()
 async def scholar_search(
-    ctx: Context, # Moved ctx to be before optional arguments
+    ctx: Context,
     query: str,
     num_results: Optional[int] = None,
     time_period_filter: Optional[str] = None,
@@ -302,17 +298,15 @@ async def scholar_search(
         await ctx.error(f"Serper API error in scholar_search for query '{query}': {e}")
         raise
     except Exception as e:
-        await ctx.error(f"Unexpected error in scholar_search for query '{query}': {e}") # Removed exc_info
+        await ctx.error(f"Unexpected error in scholar_search for query '{query}': {e}")
         if not isinstance(e, SerperApiClientError):
             raise SerperApiClientError(f"An unexpected error occurred in scholar_search tool: {e}") from e
         raise
 
-import asyncio # Ensure asyncio is imported
-
 async def print_available_tools():
     """Helper async function to print available tools."""
     # Correctly get tools using the async method
-    tools_dict = await mcp.get_tools() # mcp is defined globally in the script
+    tools_dict = await mcp.get_tools()
     print(f"Available tools: {[tool_name for tool_name in tools_dict.keys()]}")
 
 if __name__ == "__main__":
@@ -346,7 +340,6 @@ if __name__ == "__main__":
         transport_type = "sse"
     else:
         transport_type = raw_transport_type # type: ignore
-        # We've validated it's one of the Literal strings, so ignore type checker here.
 
     print(f"Attempting to start server with {transport_type.upper()} transport...")
     if transport_type != "stdio":
