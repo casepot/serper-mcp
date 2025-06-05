@@ -11,10 +11,13 @@ SERPER_GOOGLE_SEARCH_HOST = "google.serper.dev"
 SERPER_SCRAPE_HOST = "scrape.serper.dev"
 SERPER_API_KEY_ENV_VAR = "SERPER_API_KEY"
 
+
 # --- Custom Exception ---
 class SerperApiClientError(Exception):
     """Custom exception for Serper API client errors."""
+
     pass
+
 
 # --- Private Helper Function ---
 def _get_resolved_api_key(api_key: Optional[str]) -> str:
@@ -26,11 +29,9 @@ def _get_resolved_api_key(api_key: Optional[str]) -> str:
         )
     return resolved_key
 
+
 def _make_serper_request(
-    host: str,
-    path: str,
-    payload: Dict[str, Any],
-    api_key: Optional[str] = None
+    host: str, path: str, payload: Dict[str, Any], api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Makes a POST request to a Serper API endpoint.
@@ -50,10 +51,7 @@ def _make_serper_request(
     """
     resolved_api_key = _get_resolved_api_key(api_key)
 
-    headers = {
-        'X-API-KEY': resolved_api_key,
-        'Content-Type': 'application/json'
-    }
+    headers = {"X-API-KEY": resolved_api_key, "Content-Type": "application/json"}
 
     conn: Optional[http.client.HTTPSConnection] = None
     try:
@@ -62,11 +60,17 @@ def _make_serper_request(
         res = conn.getresponse()
         response_data_bytes = res.read()
     except http.client.HTTPException as e:
-        raise SerperApiClientError(f"HTTP client error during API request to {host}{path}: {e}")
+        raise SerperApiClientError(
+            f"HTTP client error during API request to {host}{path}: {e}"
+        )
     except ConnectionError as e:
         raise SerperApiClientError(f"Network connection error to {host}{path}: {e}")
-    except Exception as e: # Catching a broader set of potential issues during the request
-        raise SerperApiClientError(f"An unexpected error occurred during API request to {host}{path}: {e}")
+    except (
+        Exception
+    ) as e:  # Catching a broader set of potential issues during the request
+        raise SerperApiClientError(
+            f"An unexpected error occurred during API request to {host}{path}: {e}"
+        )
     finally:
         if conn:
             conn.close()
@@ -74,12 +78,14 @@ def _make_serper_request(
     try:
         response_data_str = response_data_bytes.decode("utf-8")
     except UnicodeDecodeError as e:
-        raise SerperApiClientError(f"Failed to decode API response from {host}{path} (not UTF-8): {e}")
+        raise SerperApiClientError(
+            f"Failed to decode API response from {host}{path} (not UTF-8): {e}"
+        )
 
     if not (200 <= res.status < 300):
         error_message = (
             f"API request to {host}{path} failed with status {res.status}: {res.reason}. "
-            f"Response: {response_data_str[:500]}" # Limit response preview in error
+            f"Response: {response_data_str[:500]}"  # Limit response preview in error
         )
         raise SerperApiClientError(error_message)
 
@@ -90,6 +96,7 @@ def _make_serper_request(
             f"Failed to decode JSON response from {host}{path}: {e}. Response: {response_data_str[:500]}"
         )
 
+
 # --- Public API Functions (from user provided code) ---
 def query_serper_api(
     query_text: str,
@@ -99,7 +106,7 @@ def query_serper_api(
     num_results: Optional[int] = None,
     autocorrect: Optional[bool] = None,
     time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None
+    page_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Queries the Serper.dev Search API (google.serper.dev for /search, /news, /scholar).
@@ -116,38 +123,35 @@ def query_serper_api(
         payload["num"] = num_results
     # Default autocorrect to False if not specified, otherwise use the provided value.
     payload["autocorrect"] = False if autocorrect is None else autocorrect
-    
+
     if time_period_filter is not None:
         payload["tbs"] = time_period_filter
     if page_number is not None:
         payload["page"] = page_number
-    
+
     return _make_serper_request(
         host=SERPER_GOOGLE_SEARCH_HOST,
         path=f"/{search_endpoint}",
         payload=payload,
-        api_key=api_key
+        api_key=api_key,
     )
 
+
 def scrape_serper_url(
-    url_to_scrape: str,
-    api_key: Optional[str] = None,
-    include_markdown: bool = True
+    url_to_scrape: str, api_key: Optional[str] = None, include_markdown: bool = True
 ) -> Dict[str, Any]:
     """
     Scrapes a webpage using the Serper.dev Scrape API (scrape.serper.dev).
     """
     payload: Dict[str, Union[str, bool]] = {
         "url": url_to_scrape,
-        "includeMarkdown": include_markdown
+        "includeMarkdown": include_markdown,
     }
-    
+
     return _make_serper_request(
-        host=SERPER_SCRAPE_HOST,
-        path="/",
-        payload=payload,
-        api_key=api_key
+        host=SERPER_SCRAPE_HOST, path="/", payload=payload, api_key=api_key
     )
+
 
 # --- FastMCP Server Definition ---
 mcp: FastMCP = FastMCP(
@@ -156,10 +160,11 @@ mcp: FastMCP = FastMCP(
 It relies on the SERPER_API_KEY environment variable being set on the server machine for authentication with Serper.dev.
 Each tool performs a single query. For multiple distinct queries, call the respective tool multiple times.
 Tool annotations like 'readOnlyHint': true, 'idempotentHint': true, 'openWorldHint': true generally apply to these search tools.""",
-    mask_error_details=True # Mask internal error details from clients
+    mask_error_details=True,  # Mask internal error details from clients
 )
 
 # --- MCP Tool Definitions ---
+
 
 @mcp.tool()
 async def google_search(
@@ -169,7 +174,7 @@ async def google_search(
     num_results: Optional[int] = None,
     autocorrect: Optional[bool] = None,
     time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None
+    page_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Performs a web search using Google (via Serper.dev).
@@ -190,16 +195,18 @@ async def google_search(
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
-        await ctx.info(f"google_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}")
+        await ctx.info(
+            f"google_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+        )
         return query_serper_api(
             query_text=query,
-            api_key=None, # Ensures environment variable SERPER_API_KEY is used
+            api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="search",
             location=location,
             num_results=num_results,
             autocorrect=autocorrect,
             time_period_filter=time_period_filter,
-            page_number=page_number
+            page_number=page_number,
         )
     except SerperApiClientError as e:
         await ctx.error(f"Serper API error in google_search for query '{query}': {e}")
@@ -208,8 +215,11 @@ async def google_search(
         await ctx.error(f"Unexpected error in google_search for query '{query}': {e}")
         # Re-raise as SerperApiClientError to ensure consistent error type from this layer if not already one
         if not isinstance(e, SerperApiClientError):
-            raise SerperApiClientError(f"An unexpected error occurred in google_search tool: {e}") from e
+            raise SerperApiClientError(
+                f"An unexpected error occurred in google_search tool: {e}"
+            ) from e
         raise
+
 
 @mcp.tool()
 async def news_search(
@@ -219,7 +229,7 @@ async def news_search(
     num_results: Optional[int] = None,
     autocorrect: Optional[bool] = None,
     time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None
+    page_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Fetches news articles using Google News.
@@ -240,16 +250,18 @@ async def news_search(
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
-        await ctx.info(f"news_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}")
+        await ctx.info(
+            f"news_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+        )
         return query_serper_api(
             query_text=query,
-            api_key=None, # Ensures environment variable SERPER_API_KEY is used
+            api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="news",
             location=location,
             num_results=num_results,
             autocorrect=autocorrect,
             time_period_filter=time_period_filter,
-            page_number=page_number
+            page_number=page_number,
         )
     except SerperApiClientError as e:
         await ctx.error(f"Serper API error in news_search for query '{query}': {e}")
@@ -257,8 +269,11 @@ async def news_search(
     except Exception as e:
         await ctx.error(f"Unexpected error in news_search for query '{query}': {e}")
         if not isinstance(e, SerperApiClientError):
-            raise SerperApiClientError(f"An unexpected error occurred in news_search tool: {e}") from e
+            raise SerperApiClientError(
+                f"An unexpected error occurred in news_search tool: {e}"
+            ) from e
         raise
+
 
 @mcp.tool()
 async def scholar_search(
@@ -266,7 +281,7 @@ async def scholar_search(
     query: str,
     num_results: Optional[int] = None,
     time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None
+    page_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Fetches academic/scholar articles using Google Scholar (via Serper.dev).
@@ -285,14 +300,16 @@ async def scholar_search(
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
-        await ctx.info(f"scholar_search called with query: '{query}', num_results: {num_results}, time_period_filter: {time_period_filter}, page_number: {page_number}")
+        await ctx.info(
+            f"scholar_search called with query: '{query}', num_results: {num_results}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+        )
         return query_serper_api(
             query_text=query,
-            api_key=None, # Ensures environment variable SERPER_API_KEY is used
+            api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="scholar",
             num_results=num_results,
             time_period_filter=time_period_filter,
-            page_number=page_number
+            page_number=page_number,
         )
     except SerperApiClientError as e:
         await ctx.error(f"Serper API error in scholar_search for query '{query}': {e}")
@@ -300,8 +317,11 @@ async def scholar_search(
     except Exception as e:
         await ctx.error(f"Unexpected error in scholar_search for query '{query}': {e}")
         if not isinstance(e, SerperApiClientError):
-            raise SerperApiClientError(f"An unexpected error occurred in scholar_search tool: {e}") from e
+            raise SerperApiClientError(
+                f"An unexpected error occurred in scholar_search tool: {e}"
+            ) from e
         raise
+
 
 async def print_available_tools():
     """Helper async function to print available tools."""
@@ -309,37 +329,45 @@ async def print_available_tools():
     tools_dict = await mcp.get_tools()
     print(f"Available tools: {[tool_name for tool_name in tools_dict.keys()]}")
 
+
 if __name__ == "__main__":
     print("Initializing SerperDevMCPServer...")
-    
+
     # Check for API key and print status
     api_key_present = os.getenv(SERPER_API_KEY_ENV_VAR)
     if not api_key_present:
-        print(f"WARNING: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set. Serper API calls will likely fail.")
-        print("Please set it in your environment or in a .env file (if dotenv is used).")
+        print(
+            f"WARNING: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set. Serper API calls will likely fail."
+        )
+        print(
+            "Please set it in your environment or in a .env file (if dotenv is used)."
+        )
     else:
         print(f"The '{SERPER_API_KEY_ENV_VAR}' environment variable is set.")
 
-    # Run the async helper function to print tools
     print("Fetching available tools...")
     asyncio.run(print_available_tools())
-    
+
     server_host = os.getenv("MCP_SERVER_HOST", "0.0.0.0")
     server_port_str = os.getenv("MCP_SERVER_PORT", "8000")
     try:
         server_port = int(server_port_str)
     except ValueError:
-        print(f"Warning: Invalid MCP_SERVER_PORT value '{server_port_str}'. Defaulting to 8000.")
+        print(
+            f"Warning: Invalid MCP_SERVER_PORT value '{server_port_str}'. Defaulting to 8000."
+        )
         server_port = 8000
-        
+
     raw_transport_type = os.getenv("MCP_SERVER_TRANSPORT", "sse")
-    # Validate transport type
+
     allowed_transports = {"stdio", "streamable-http", "sse"}
     if raw_transport_type not in allowed_transports:
-        print(f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'sse'.")
+        print(
+            f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'sse'."
+        )
         transport_type = "sse"
     else:
-        transport_type = raw_transport_type # type: ignore
+        transport_type = raw_transport_type  # type: ignore
 
     print(f"Attempting to start server with {transport_type.upper()} transport...")
     if transport_type != "stdio":
@@ -347,9 +375,9 @@ if __name__ == "__main__":
     else:
         print("Using STDIO transport.")
     print("Press Ctrl+C to stop the server.")
-    
+
     try:
-        mcp.run(transport=transport_type, port=server_port, host=server_host) # type: ignore
+        mcp.run(transport=transport_type, port=server_port, host=server_host)  # type: ignore
     except KeyboardInterrupt:
         print("\nServer shutdown requested by user.")
     except Exception as e:
