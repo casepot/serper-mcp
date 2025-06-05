@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "language-server": {
+      "command": "mcp-language-server",
+      "args": [
+        "--workspace",
+        "/Users/case/projects/serper-mcp",
+        "--lsp",
+        "pyright-langserver", 
+        "--",
+        "--stdio"
+      ],
+      "disabled": false 
+    }
+    // Add other MCP server configurations here based on future conditionals
+  }
+}
