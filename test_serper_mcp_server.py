@@ -2,7 +2,6 @@ import pytest
 import os
 from unittest.mock import patch, MagicMock
 
-# Import the FastMCP server instance and any custom exceptions from your server file
 from serper_mcp_server import mcp as serper_mcp_server, SerperApiClientError, SERPER_API_KEY_ENV_VAR
 
 
@@ -28,10 +27,6 @@ async def test_google_search_tool_success(mcp_server_instance):
     with patch('serper_mcp_server.query_serper_api') as mock_query_serper_api:
         mock_query_serper_api.return_value = expected_response_data
         
-        # Mock the context methods if they are called directly in the success path,
-        # though for this success test, only query_serper_api is critical.
-        # If ctx.info was called before query_serper_api, we'd mock it.
-        # For now, we assume ctx.info is called and does not affect the return value.
         mock_ctx = MagicMock()
         mock_ctx.info = MagicMock() # Mock async methods if needed: mock_ctx.info = AsyncMock() for Python 3.8+
         mock_ctx.error = MagicMock()
@@ -46,30 +41,9 @@ async def test_google_search_tool_success(mcp_server_instance):
 
             assert tool_result is not None
             assert len(tool_result) == 1 # Expect one content item
-            # The result of call_tool is a list of Content objects.
-            # FastMCP by default returns a dictionary from the tool as a JSON string in TextContent.
-            # Or, if the tool returns a Pydantic model, it might be handled differently.
-            # Assuming it's a dict returned directly from your tool,
-            # FastMCP's default behavior might wrap it.
-            # Let's assume the tool directly returns the dict and FastMCP passes it through
-            # or that the client.call_tool unwraps it appropriately.
-            # Based on FastMCP, the raw tool output is often in result[0].data or similar
-            # if it's not simple text.
-            # For a tool returning a dict, FastMCP client might give it back directly
-            # or as a JSON string in result[0].text.
-            # Let's assume the client gives us the direct dictionary output if the tool returns a dict.
-            # If the tool returns a dict, the client.call_tool should ideally return it as such.
-            # The FastMCP documentation snippet `assert result[0].text == "Hello, World!"` implies
-            # that if a string is returned, it's in .text.
-            # If a dict is returned, it might be directly in the result object or need parsing.
-            # Let's assume for now the client returns the dict directly as part of the result structure.
-            # The actual structure might be `result[0].data` or similar depending on FastMCP version
-            # and how it handles non-string returns.
-            # For now, let's assume the tool's direct dictionary output is what we get.
-            # This part might need adjustment based on actual Client behavior with dict returns.
 
             # The `call_tool` method in `fastmcp.Client` returns a list of `Content` objects.
-            # If your tool returns a dictionary, `fastmcp` typically serializes it to JSON
+            # If a tool returns a dictionary, `fastmcp` typically serializes it to JSON
             # and places it in the `text` attribute of a `TextContent` object.
             import json
             assert tool_result[0].type == "text"
