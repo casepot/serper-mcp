@@ -1,17 +1,4 @@
 {
   "mcpServers": {
-    "language-server": {
-      "type": "stdio",
-      "command": "mcp-language-server",
-      "args": [
-        "--workspace",
-        "/Users/case/projects/serper-mcp",
-        "--lsp",
-        "pyright",
-        "--",
-        "--stdio"
-      ],
-      "disabled": false
-    }
   }
 }
