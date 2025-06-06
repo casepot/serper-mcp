@@ -1,0 +1,75 @@
+# Product Requirements Document: MCP-Language-Server (NextGen)
+
+## 1. Introduction
+
+### 1.1 Problem Statement
+LLM agents utilizing the current `MCP-language-server` for Python code intelligence face significant challenges in reliably obtaining accurate and detailed information about code structures, particularly for symbols imported from external dependencies. Configuration of the underlying `pyright-langserver` is opaque from the agent's perspective, and error diagnostics are often minimal or misleading. This leads to extended troubleshooting cycles, reduced agent autonomy, and suboptimal performance in code generation, analysis, and modification tasks.
+
+### 1.2 Current Limitations of MCP-Language-Server
+Based on direct interaction and troubleshooting, the current server exhibits several key limitations when used by an LLM agent:
+*   **Unreliable `definition` Tool:** The `definition` tool frequently fails to locate symbols from external dependencies when queried by their fully qualified name (FQN) and has shown inconsistencies even with project-local FQNs until precise configuration was achieved.
+*   **Inconsistent `hover` Tool Behavior:** The detail and accuracy of information returned by the `hover` tool vary significantly depending on the context of the symbol (e.g., import line, direct instantiation, nested type hint). It may return module-level info instead of specific class/function signatures, or no information at all.
+*   **Opaque Configuration & Environment Management:** LLM agents have no direct insight into whether the `pyright-langserver` is correctly configured, using the intended virtual environment, or properly scoping its analysis. This was a major source of debugging effort.
+*   **Insufficient Error Reporting & Diagnostics:** Error messages from tools are often generic (e.g., "symbol not found"), lacking specific details from the underlying `pyright-langserver` that would aid in diagnosing issues related to environment, configuration, or code. The server's own diagnostic logs (e.g., `mcp_language_server.log`) were found to be unhelpful (empty).
+*   **Suboptimal Context for LLMs:** Existing tools provide basic LSP responses, which are not always formatted or contextualized optimally for an LLM agent's reasoning and task execution processes.
+
+### 1.3 Vision for Improvement
+`MCP-Language-Server (NextGen)` will be a robust, transparent, and LLM-centric interface to `pyright-langserver`. It will provide highly reliable and consistent code intelligence, offer clear diagnostics regarding its operational status and configuration, and deliver rich, contextual information tailored to empower LLM agents in understanding, generating, and modifying Python code with high precision, efficiency, and autonomy. It will be a language server interface designed from the ground up for LLM agents to use.
+
+## 2. Goals and Objectives
+
+1.  **Goal: Achieve High-Fidelity Symbol Resolution.**
+    *   **Objective 1.1:** By the end of the next development cycle (Q_TARGET), ensure the `definition` tool successfully resolves >95% of valid fully qualified names for symbols within the project and its correctly installed dependencies in the configured virtual environment.
+    *   **Objective 1.2:** By Q_TARGET, ensure the `hover` tool provides consistently detailed (full signature, docstring if available) and accurate type information for >90% of symbols across diverse usage contexts (imports, direct use, nested constructs).
+
+2.  **Goal: Enhance Configuration Transparency and Diagnosability.**
+    *   **Objective 2.1:** Implement a new `diagnose_setup` MCP tool by Q_TARGET that reports on `pyrightconfig.json` validity, detected virtual environment path, Python version, and status of core `pyright-langserver` initialization.
+    *   **Objective 2.2:** Ensure that >90% of configuration-related errors from `pyright-langserver` are specifically propagated to the LLM agent through MCP tool responses by Q_TARGET.
+
+3.  **Goal: Deliver Rich, LLM-Consumable Contextual Information.**
+    *   **Objective 3.1:** Introduce at least three new MCP tools by Q_TARGET+1 that provide advanced code understanding (e.g., "find references with context," "get type hierarchy," "get call graph snippets") designed for LLM consumption.
+
+4.  **Goal: Improve Server Robustness and Debuggability.**
+    *   **Objective 4.1:** Implement structured, configurable logging within `MCP-Language-Server (NextGen)` itself, accessible via an MCP resource, by Q_TARGET.
+    *   **Objective 4.2:** Reduce instances of the language server becoming unresponsive or crashing due to underlying `pyright-langserver` issues by 75% through better error handling and process management by Q_TARGET+1.
+
+## 3. Target Audience
+
+*   **Primary:** LLM-based development agents (e.g., code generation agents, refactoring agents, debugging agents, code analysis agents) interacting programmatically with Python codebases via the Model Context Protocol.
+*   **Secondary:** Human developers utilizing MCP clients for Python development who require programmatic, automatable access to language server features for custom tooling or advanced workflows.
+
+## 4. Proposed Features and Enhancements
+
+1.  **Advanced Symbol Resolution Engine:**
+    *   **Description:** A significant rework of the backend logic for the `definition` and `hover` tools. This involves deeper integration with `pyright-langserver`'s capabilities to ensure reliable resolution of fully qualified names (FQNs) for both project-local symbols and those from external dependencies within the correctly configured virtual environment. The engine will prioritize providing full signatures, docstrings, and type information consistently, regardless of whether a symbol is referenced in an import statement, direct usage, or complex type annotation.
+    *   **LLM Benefit:** Drastically reduces "symbol not found" errors and inconsistent hover details, allowing LLMs to confidently understand and use APIs.
+
+2.  **Interactive Configuration & Environment Diagnostics Toolkit:**
+    *   **Description:** A suite of new MCP tools (e.g., `get_language_server_status`, `validate_pyright_configuration`, `get_active_python_environment_details`) that allow an LLM agent to proactively query and understand the `MCP-Language-Server`'s operational state. This includes the status of `pyright-langserver`, the parsed `pyrightconfig.json` (or equivalent), the detected virtual environment, Python interpreter version, and a list of successfully indexed top-level packages from the venv.
+    *   **LLM Benefit:** Enables LLMs to self-diagnose setup issues or confirm correct environment before attempting complex code intelligence operations, reducing failed tool calls.
+
+3.  **LLM-Optimized Contextual Code Intelligence Suite:**
+    *   **Description:** Introduction of new tools designed to provide code intelligence in formats and scopes that are highly useful for LLM reasoning. Examples:
+        *   `get_symbol_references_with_context`: Returns reference locations along with N surrounding lines of code and the type of reference (e.g., call, read, write).
+        *   `get_type_hierarchy`: For a given class symbol, returns its parent classes, implemented interfaces, and direct known subclasses within the project.
+        *   `get_function_call_graph_snippet`: For a given function, returns a list of functions it calls and a list of functions that call it (configurable depth).
+        *   `explain_symbol_signature`: Provides a structured breakdown of a function/method signature, including parameter names, types, default values, and docstring parts.
+    *   **LLM Benefit:** Provides richer, more structured information that directly supports tasks like impact analysis for refactoring, understanding object-oriented designs, and generating calls to complex functions.
+
+4.  **Transparent Error Propagation & Granular Logging:**
+    *   **Description:** Modify the server to capture and relay specific error messages and diagnostic codes from `pyright-langserver` directly to the LLM agent through the MCP tool's error response. This replaces generic failure messages. Implement comprehensive and configurable logging within `MCP-Language-Server (NextGen)` itself, with logs accessible via a dedicated MCP resource (e.g., `mcp://language-server/log?level=debug`).
+    *   **LLM Benefit:** Allows LLMs (or their human supervisors) to understand the precise nature of a failure (e.g., "Pyright: ModuleNotFoundError for 'X'", "Pyright: ConfigParseError in pyrightconfig.json at line Y") and take more informed corrective actions.
+
+5.  **Enhanced Workspace Symbol Search & Discovery:**
+    *   **Description:** A new tool, `find_workspace_symbols`, that allows searching for symbols (classes, functions, variables) across the entire workspace based on partial names, types, or semantic queries (if feasible via Pyright's capabilities). Results would include symbol kind, FQN, file path, and a snippet of its definition.
+    *   **LLM Benefit:** Helps LLMs discover relevant code or existing implementations within a large codebase without needing to know exact names or locations.
+
+## 5. User Stories
+
+1.  As a **Code-Generating LLM Agent**, I want to reliably retrieve the full definition (including signature and docstring) of any class or function from an imported library using its fully qualified name, so that I can accurately instantiate objects and call methods in the code I generate.
+2.  As a **Debugging LLM Agent**, I want the `hover` tool to consistently provide the complete signature, type information, and docstring for any symbol I target, regardless of whether it's on an import line, a direct usage, or nested within a complex type hint, so that I can quickly understand its role and expected usage without ambiguity.
+3.  As a **Refactoring LLM Agent**, I want a tool to find all references to a specific function or method, including several surrounding lines of code and the type of reference (e.g., call, attribute access) for each, so that I can comprehensively assess the impact of my proposed refactoring changes across the entire codebase.
+4.  As an **Autonomous LLM Agent Tasked with Setup**, I want to call a `validate_pyright_configuration` tool that confirms the `MCP-Language-Server` has successfully loaded `pyrightconfig.json`, identified the correct virtual environment, and can see my project's dependencies, so that I can proceed with code analysis tasks with confidence in the environment.
+5.  As a **Code-Generating LLM Agent**, when a `definition` or `hover` tool call fails, I want to receive a specific error message from `pyright-langserver` (e.g., "Pyright: Module 'xyz_utils' not found in venv '.venv/lib/python3.11/site-packages'") instead of a generic "symbol not found", so that I can understand the root cause and potentially suggest corrective actions like installing a missing package or correcting an import statement.
+6.  As a **Code Comprehension LLM Agent**, I want to retrieve the class hierarchy (parent classes, implemented interfaces, and direct child classes) for a given class symbol, so that I can build a mental model of the object-oriented design and understand inheritance patterns.
+7.  As a **Troubleshooting LLM Agent (or a human developer assisting me)**, I want to access detailed, filterable logs from the `MCP-Language-Server` itself via an MCP resource, so that I can trace its internal operations and interactions with `pyright-langserver` when diagnosing complex or persistent issues.
