@@ -21,3 +21,28 @@ __pycache__/
 # OS specific
 .DS_Store
 Thumbs.db
+
+
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# NPM
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Log files
+*.log
+
+# Language server configs
+pyrightconfig.json
+
+# Dependency lock files
+package-lock.json

@@ -2,8 +2,10 @@ import asyncio
 import http.client
 import json
 import os
-from typing import Optional, Dict, Any, Union
+import argparse # Added for command-line arguments
+from typing import Optional, Dict, Any, Union, Literal, cast, Annotated
 
+from pydantic import Field
 from fastmcp import FastMCP, Context
 
 # --- Constants ---
@@ -25,7 +27,7 @@ def _get_resolved_api_key(api_key: Optional[str]) -> str:
     resolved_key = api_key if api_key is not None else os.getenv(SERPER_API_KEY_ENV_VAR)
     if not resolved_key:
         raise SerperApiClientError(
-            f"API key not provided and {SERPER_API_KEY_ENV_VAR} environment variable is not set."
+            f"Serper API key is missing. Please provide it as an argument or set the '{SERPER_API_KEY_ENV_VAR}' environment variable."
         )
     return resolved_key
 
@@ -169,26 +171,18 @@ Tool annotations like 'readOnlyHint': true, 'idempotentHint': true, 'openWorldHi
 @mcp.tool()
 async def google_search(
     ctx: Context,
-    query: str,
-    location: Optional[str] = None,
-    num_results: Optional[int] = None,
-    autocorrect: Optional[bool] = None,
-    time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None,
+    query: Annotated[str, Field(description="The search term or question.")],
+    location: Annotated[Optional[str], Field(description="The location for the search (e.g., \"United States\", \"London, United Kingdom\).")] = None,
+    num_results: Annotated[Optional[int], Field(description="Number of results to return (e.g., 10, 20, default is usually 10).")] = None,
+    autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection. Serper's default for this client is False if not specified.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter (e.g., \"qdr:h\" for past hour, \"qdr:d\" for past day, \"qdr:w\" for past week). Corresponds to the 'tbs' parameter.")] = None,
+    page_number: Annotated[Optional[int], Field(description="The page number of results to fetch (e.g., 1, 2).")] = None,
 ) -> Dict[str, Any]:
     """
     Performs a web search using Google (via Serper.dev).
     This tool queries the standard Google search.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (results may change over time due to web updates), and interacts with the open web.
-
-    Args:
-        query: The search term or question.
-        location: The location for the search (e.g., "United States", "London, United Kingdom").
-        num_results: Number of results to return (e.g., 10, 20, default is usually 10).
-        autocorrect: Whether to enable or disable query autocorrection. Serper's default for this client is False if not specified.
-        time_period_filter: Time-based search filter (e.g., "qdr:h" for past hour, "qdr:d" for past day, "qdr:w" for past week). Corresponds to the 'tbs' parameter.
-        page_number: The page number of results to fetch (e.g., 1, 2).
 
     Returns:
         A dictionary representing the parsed JSON response from the Serper API.
@@ -224,26 +218,18 @@ async def google_search(
 @mcp.tool()
 async def news_search(
     ctx: Context,
-    query: str,
-    location: Optional[str] = None,
-    num_results: Optional[int] = None,
-    autocorrect: Optional[bool] = None,
-    time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None,
+    query: Annotated[str, Field(description="The news search term (e.g., \"latest AI advancements\", \"tech earnings\").")],
+    location: Annotated[Optional[str], Field(description="The location for the news search (e.g., \"United States\").")] = None,
+    num_results: Annotated[Optional[int], Field(description="Number of news articles to return.")] = None,
+    autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter (e.g., \"qdr:h1\" for past hour, \"qdr:d1\" for past day).")] = None,
+    page_number: Annotated[Optional[int], Field(description="The page number of news results to fetch.")] = None,
 ) -> Dict[str, Any]:
     """
     Fetches news articles using Google News.
     This tool queries the Google News service.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (news results change frequently), and interacts with the open web.
-
-    Args:
-        query: The news search term (e.g., "latest AI advancements", "tech earnings").
-        location: The location for the news search (e.g., "United States").
-        num_results: Number of news articles to return.
-        autocorrect: Whether to enable or disable query autocorrection.
-        time_period_filter: Time-based search filter (e.g., "qdr:h1" for past hour, "qdr:d1" for past day).
-        page_number: The page number of news results to fetch.
 
     Returns:
         A dictionary representing the parsed JSON response from the Serper API, typically including a 'news' key.
@@ -278,22 +264,16 @@ async def news_search(
 @mcp.tool()
 async def scholar_search(
     ctx: Context,
-    query: str,
-    num_results: Optional[int] = None,
-    time_period_filter: Optional[str] = None,
-    page_number: Optional[int] = None,
+    query: Annotated[str, Field(description="The scholar search term (e.g., \"quantum computing algorithms\", \"machine learning in healthcare\").")],
+    num_results: Annotated[Optional[int], Field(description="Number of scholar articles to return.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter for scholar articles (e.g., \"as_ylo=2020\" for articles from 2020 onwards). Corresponds to 'tbs'.")] = None,
+    page_number: Annotated[Optional[int], Field(description="The page number of scholar results to fetch.")] = None,
 ) -> Dict[str, Any]:
     """
     Fetches academic/scholar articles using Google Scholar (via Serper.dev).
     This tool queries the Google Scholar service.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (results may change over time), and interacts with the open web.
-
-    Args:
-        query: The scholar search term (e.g., "quantum computing algorithms", "machine learning in healthcare").
-        num_results: Number of scholar articles to return.
-        time_period_filter: Time-based search filter for scholar articles (e.g., "as_ylo=2020" for articles from 2020 onwards). Corresponds to 'tbs'.
-        page_number: The page number of scholar results to fetch.
 
     Returns:
         A dictionary representing the parsed JSON response from the Serper API, typically including an 'organic' key.
@@ -325,28 +305,48 @@ async def scholar_search(
 
 async def print_available_tools():
     """Helper async function to print available tools."""
-    # Correctly get tools using the async method
     tools_dict = await mcp.get_tools()
     print(f"Available tools: {[tool_name for tool_name in tools_dict.keys()]}")
 
 
 if __name__ == "__main__":
-    print("Initializing SerperDevMCPServer...")
+    print("Initializing SerperDevMCPServer...", flush=True)
 
-    # Check for API key and print status
     api_key_present = os.getenv(SERPER_API_KEY_ENV_VAR)
     if not api_key_present:
         print(
-            f"WARNING: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set. Serper API calls will likely fail."
+            f"WARNING: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set. Serper API calls will likely fail.",
+            flush=True
         )
         print(
-            "Please set it in your environment or in a .env file (if dotenv is used)."
+            "Please set it in your environment or in a .env file (if dotenv is used).",
+            flush=True
         )
     else:
-        print(f"The '{SERPER_API_KEY_ENV_VAR}' environment variable is set.")
+        print(f"The '{SERPER_API_KEY_ENV_VAR}' environment variable is set.", flush=True)
 
-    print("Fetching available tools...")
+    print("Fetching available tools...", flush=True)
     asyncio.run(print_available_tools())
+
+    parser = argparse.ArgumentParser(
+        description="Runs the SerperDevMCPServer, allowing interaction with Serper.dev API services (Google Search, News, Scholar) via the Model Context Protocol (MCP).",
+        formatter_class=argparse.RawTextHelpFormatter, # Allows for newlines in help text
+    )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["stdio", "streamable-http", "sse"],
+        help=(
+            "MCP server transport type.\n"
+            "Determines how the server communicates with clients.\n"
+            "Options:\n"
+            "  stdio: Uses standard input/output (default if not specified).\n"
+            "  streamable-http: Uses HTTP for web-based clients.\n"
+            "  sse: Uses Server-Sent Events (legacy HTTP).\n"
+            "This argument overrides the MCP_SERVER_TRANSPORT environment variable."
+        ),
+    )
+    args = parser.parse_args()
 
     server_host = os.getenv("MCP_SERVER_HOST", "0.0.0.0")
     server_port_str = os.getenv("MCP_SERVER_PORT", "8000")
@@ -358,27 +358,35 @@ if __name__ == "__main__":
         )
         server_port = 8000
 
-    raw_transport_type = os.getenv("MCP_SERVER_TRANSPORT", "sse")
+    # Determine transport type: CLI arg > env var > default
+    if args.transport:
+        raw_transport_type = args.transport
+    else:
+        raw_transport_type = os.getenv("MCP_SERVER_TRANSPORT", "stdio")
 
     allowed_transports = {"stdio", "streamable-http", "sse"}
     if raw_transport_type not in allowed_transports:
         print(
-            f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'sse'."
+            f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'stdio'.",
+            flush=True
         )
-        transport_type = "sse"
+        transport_type = cast(Literal["stdio", "streamable-http", "sse"], "stdio")
     else:
-        transport_type = raw_transport_type  # type: ignore
+        transport_type = cast(Literal["stdio", "streamable-http", "sse"], raw_transport_type)
 
-    print(f"Attempting to start server with {transport_type.upper()} transport...")
-    if transport_type != "stdio":
-        print(f"Listening on http://{server_host}:{server_port}")
-    else:
-        print("Using STDIO transport.")
-    print("Press Ctrl+C to stop the server.")
-
+    print(f"Attempting to start server with {transport_type.upper()} transport...", flush=True)
+    
     try:
-        mcp.run(transport=transport_type, port=server_port, host=server_host)  # type: ignore
+        if transport_type != "stdio":
+            print(f"Listening on http://{server_host}:{server_port}", flush=True)
+            print("Press Ctrl+C to stop the server.", flush=True)
+            mcp.run(transport=transport_type, port=server_port, host=server_host)  # type: ignore
+        else:
+            print("Using STDIO transport.", flush=True)
+            print("Press Ctrl+C to stop the server.", flush=True)
+            mcp.run(transport=transport_type)  # host and port are not applicable for stdio
     except KeyboardInterrupt:
         print("\nServer shutdown requested by user.")
     except Exception as e:
         print(f"Failed to start server: {e}")
+

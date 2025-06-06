@@ -3,8 +3,9 @@ import http.client
 import json
 import os
 import logging
+import argparse # Added for command-line arguments
 from collections import defaultdict, deque
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, Literal, cast
 from datetime import datetime, timedelta
 
 from fastmcp import FastMCP, Context
@@ -102,7 +103,7 @@ def _get_resolved_api_key(api_key: Optional[str]) -> str:
     resolved_key = api_key if api_key is not None else os.getenv(SERPER_API_KEY_ENV_VAR)
     if not resolved_key:
         raise SerperApiClientError(
-            f"API key not provided and {SERPER_API_KEY_ENV_VAR} environment variable is not set."
+            f"Serper API key is missing. Please provide it as an argument or set the '{SERPER_API_KEY_ENV_VAR}' environment variable."
         )
     return resolved_key
 
@@ -503,27 +504,47 @@ async def print_available_tools():
 
 
 if __name__ == "__main__":
-    print("Initializing Secure SerperDevMCPServer...")
+    print("Initializing Secure SerperDevMCPServer...", flush=True)
 
     api_key_present = os.getenv(SERPER_API_KEY_ENV_VAR)
     if not api_key_present:
         security_logger.error(
             f"CRITICAL: {SERPER_API_KEY_ENV_VAR} environment variable is not set"
         )
-        print(f"ERROR: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set.")
+        print(f"ERROR: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set.", flush=True)
         exit(1)
     else:
         security_logger.info("API key configuration verified")
-        print(f"✓ {SERPER_API_KEY_ENV_VAR} environment variable is configured")
+        print(f"✓ {SERPER_API_KEY_ENV_VAR} environment variable is configured", flush=True)
 
     # Print security configuration
     auth_mode = os.getenv("MCP_AUTH_MODE", "none")
-    print(f"Security Mode: {auth_mode}")
-    print(f"Rate Limit: {MAX_REQUESTS_PER_MINUTE} requests/minute")
-    print(f"Max Query Length: {MAX_QUERY_LENGTH} characters")
+    print(f"Security Mode: {auth_mode}", flush=True)
+    print(f"Rate Limit: {MAX_REQUESTS_PER_MINUTE} requests/minute", flush=True)
+    print(f"Max Query Length: {MAX_QUERY_LENGTH} characters", flush=True)
 
-    print("Fetching available tools...")
+    print("Fetching available tools...", flush=True)
     asyncio.run(print_available_tools())
+
+    parser = argparse.ArgumentParser(
+        description="Runs the SecureSerperDevMCPServer with authentication and rate limiting, allowing interaction with Serper.dev API services via MCP.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["stdio", "streamable-http", "sse"],
+        help=(
+            "MCP server transport type.\n"
+            "Determines how the server communicates with clients.\n"
+            "Options:\n"
+            "  stdio: Uses standard input/output (default if not specified and MCP_SERVER_TRANSPORT is not set).\n"
+            "  streamable-http: Uses HTTP for web-based clients.\n"
+            "  sse: Uses Server-Sent Events (legacy HTTP).\n"
+            "This argument overrides the MCP_SERVER_TRANSPORT environment variable."
+        ),
+    )
+    args = parser.parse_args()
 
     server_host = os.getenv("MCP_SERVER_HOST", "0.0.0.0")
     server_port_str = os.getenv("MCP_SERVER_PORT", "8000")
@@ -531,32 +552,41 @@ if __name__ == "__main__":
         server_port = int(server_port_str)
     except ValueError:
         print(
-            f"Warning: Invalid MCP_SERVER_PORT value '{server_port_str}'. Defaulting to 8000."
+            f"Warning: Invalid MCP_SERVER_PORT value '{server_port_str}'. Defaulting to 8000.",
+            flush=True
         )
         server_port = 8000
 
-    raw_transport_type = os.getenv("MCP_SERVER_TRANSPORT", "sse")
+    # Determine transport type: CLI arg > env var > default "stdio"
+    if args.transport:
+        raw_transport_type = args.transport
+    else:
+        raw_transport_type = os.getenv("MCP_SERVER_TRANSPORT", "stdio") # Default to stdio
+
     allowed_transports = {"stdio", "streamable-http", "sse"}
     if raw_transport_type not in allowed_transports:
         print(
-            f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'sse'."
+            f"Warning: Invalid MCP_SERVER_TRANSPORT value '{raw_transport_type}'. Defaulting to 'stdio'.",
+            flush=True
         )
-        transport_type = "sse"
+        transport_type = cast(Literal["stdio", "streamable-http", "sse"], "stdio")
     else:
-        transport_type = raw_transport_type
+        transport_type = cast(Literal["stdio", "streamable-http", "sse"], raw_transport_type)
 
-    print(f"Starting secure server with {transport_type.upper()} transport...")
-    if transport_type != "stdio":
-        print(f"Listening on http://{server_host}:{server_port}")
-    else:
-        print("Using STDIO transport.")
-    print("Press Ctrl+C to stop the server.")
-
+    print(f"Starting secure server with {transport_type.upper()} transport...", flush=True)
+    
     try:
-        mcp.run(transport=transport_type, port=server_port, host=server_host)  # type: ignore
+        if transport_type != "stdio":
+            print(f"Listening on http://{server_host}:{server_port}", flush=True)
+            print("Press Ctrl+C to stop the server.", flush=True)
+            mcp.run(transport=transport_type, port=server_port, host=server_host)  # type: ignore
+        else:
+            print("Using STDIO transport.", flush=True)
+            print("Press Ctrl+C to stop the server.", flush=True)
+            mcp.run(transport=transport_type)  # host and port are not applicable for stdio
     except KeyboardInterrupt:
         security_logger.info("Server shutdown requested by user")
-        print("\nServer shutdown requested by user.")
+        print("\nServer shutdown requested by user.", flush=True)
     except Exception as e:
         security_logger.error(f"Failed to start server: {e}")
-        print(f"Failed to start server: {e}")
+        print(f"Failed to start server: {e}", flush=True)
