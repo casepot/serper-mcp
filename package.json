@@ -1,0 +1,23 @@
+{
+  "name": "serper-mcp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/casepot/serper-mcp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/casepot/serper-mcp/issues"
+  },
+  "homepage": "https://github.com/casepot/serper-mcp#readme",
+  "description": "",
+  "dependencies": {
+    "pyright": "^1.1.401"
+  }
+}
