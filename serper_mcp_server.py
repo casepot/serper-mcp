@@ -302,6 +302,46 @@ async def scholar_search(
             ) from e
         raise
 
+@mcp.tool()
+async def scrape_url(
+    ctx: Context,
+    url: Annotated[str, Field(description="The URL of the webpage to scrape and extract Markdown from.")],
+) -> str:
+    """
+    Fetches and extracts the Markdown content from a given URL.
+    This tool uses the Serper.dev Scrape API to get the content.
+    It relies on the SERPER_API_KEY environment variable for authentication.
+    This tool is read-only and interacts with the open web.
+
+    Returns:
+        A string containing the Markdown content of the webpage.
+        If the API call is successful but no Markdown is returned, an empty string is provided.
+        In case of an error from the Serper API, a SerperApiClientError will be raised.
+    """
+    try:
+        await ctx.info(f"scrape_url called with url: '{url}'")
+        # The scrape_serper_url function handles the actual API call.
+        # We ensure include_markdown is True as required.
+        response_data = scrape_serper_url(
+            url_to_scrape=url,
+            api_key=None,  # Ensures environment variable is used
+            include_markdown=True,
+        )
+
+        # Per the requirement, we only return the 'markdown' field.
+        markdown_content = response_data.get("markdown", "")
+        return markdown_content
+
+    except SerperApiClientError as e:
+        await ctx.error(f"Serper API error in scrape_url for url '{url}': {e}")
+        raise
+    except Exception as e:
+        await ctx.error(f"Unexpected error in scrape_url for url '{url}': {e}")
+        if not isinstance(e, SerperApiClientError):
+            raise SerperApiClientError(
+                f"An unexpected error occurred in scrape_url tool: {e}"
+            ) from e
+        raise
 
 async def print_available_tools():
     """Helper async function to print available tools."""

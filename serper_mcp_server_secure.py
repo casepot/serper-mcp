@@ -21,7 +21,7 @@ SERPER_API_KEY_ENV_VAR = "SERPER_API_KEY"
 # Security configuration
 MAX_REQUESTS_PER_MINUTE = int(os.getenv("MAX_REQUESTS_PER_MINUTE", "60"))
 MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "500"))
-ALLOWED_ENDPOINTS = {"search", "news", "scholar"}
+ALLOWED_ENDPOINTS = {"search", "news", "scholar", "scrape"}
 
 # Setup logging
 logging.basicConfig(
@@ -496,6 +496,45 @@ async def scholar_search(
             ) from e
         raise
 
+@mcp.tool()
+async def scrape_url(
+    ctx: Context,
+    url: str,
+) -> str:
+    """
+    Securely fetches and extracts the Markdown content from a given URL.
+    Requires 'scrape:read' scope and is subject to rate limiting.
+    """
+    try:
+        client_id = await check_permissions_and_rate_limit(ctx, "scrape:read")
+
+        await ctx.info(f"Secure scrape_url from client {client_id}: '{url[:100]}...'")
+
+        # The scrape_serper_url function handles the actual API call and its own validation
+        response_data = scrape_serper_url(
+            url_to_scrape=url,
+            api_key=None,  # Ensures environment variable is used
+            include_markdown=True,
+            client_id=client_id,
+        )
+
+        # Per the requirement, we only return the 'markdown' field.
+        markdown_content = response_data.get("markdown", "")
+        return markdown_content
+
+    except (SecurityError, ValueError) as e:
+        await ctx.error(f"Security/validation error in scrape_url: {e}")
+        raise
+    except SerperApiClientError as e:
+        await ctx.error(f"Serper API error in scrape_url for url '{url[:100]}...': {e}")
+        raise
+    except Exception as e:
+        await ctx.error(f"Unexpected error in scrape_url: {e}")
+        if not isinstance(e, (SerperApiClientError, SecurityError)):
+            raise SerperApiClientError(
+                f"An unexpected error occurred in scrape_url tool: {e}"
+            ) from e
+        raise
 
 async def print_available_tools():
     """Helper async function to print available tools."""

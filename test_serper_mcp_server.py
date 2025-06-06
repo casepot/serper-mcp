@@ -414,3 +414,145 @@ def test_server_invalid_transport_input(script_name, cli_args, env_vars, expecte
     # print(output)
     # print("--- End Error Output ---")
     assert expected_error_msg_part in output
+
+
+@pytest.mark.asyncio
+async def test_scrape_url_tool_success(mcp_server_instance):
+    """
+    Tests the scrape_url tool for a successful scrape.
+    This test mocks the underlying 'scrape_serper_url' to avoid actual API calls.
+    """
+    expected_markdown = "## Scraped Content\n\nThis is the markdown."
+    full_api_response = {
+        "text": "Scraped Content...",
+        "markdown": expected_markdown,
+        "metadata": {"title": "Scraped Page"},
+        "credits": 1,
+    }
+
+    with patch("serper_mcp_server.scrape_serper_url") as mock_scrape_serper_url:
+        mock_scrape_serper_url.return_value = full_api_response
+
+        from fastmcp import Client
+
+        async with Client(mcp_server_instance) as client:
+            tool_result = await client.call_tool(
+                "scrape_url", {"url": "http://example.com/scrape-me"}
+            )
+
+            assert tool_result is not None
+            assert len(tool_result) == 1
+            assert tool_result[0].type == "text"
+            # The tool should return the raw markdown string directly
+            assert tool_result[0].text == expected_markdown
+
+            mock_scrape_serper_url.assert_called_once_with(
+                url_to_scrape="http://example.com/scrape-me",
+                api_key=None,
+                include_markdown=True,
+            )
+
+
+@pytest.mark.asyncio
+async def test_scrape_url_tool_api_error(mcp_server_instance):
+    """
+    Tests the scrape_url tool when the underlying Serper API call fails.
+    """
+    with patch("serper_mcp_server.scrape_serper_url") as mock_scrape_serper_url:
+        mock_scrape_serper_url.side_effect = SerperApiClientError(
+            "Simulated scrape API error"
+        )
+
+        from fastmcp import Client
+        from fastmcp.exceptions import ToolError
+
+        async with Client(mcp_server_instance) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "scrape_url", {"url": "http://example.com/scrape-error"}
+                )
+
+            assert "Error calling tool 'scrape_url'" in str(exc_info.value)
+            mock_scrape_serper_url.assert_called_once_with(
+                url_to_scrape="http://example.com/scrape-error",
+                api_key=None,
+                include_markdown=True,
+            )
+
+# It's better to have a separate test file for the secure server,
+# but for this task, I will add them here.
+
+@pytest.fixture
+def secure_mcp_server_instance():
+    """Provides an instance of the Secure Serper MCP server."""
+    from serper_mcp_server_secure import mcp
+    from fastmcp.server.auth import BearerAuthProvider
+    from fastmcp.server.auth.providers.bearer import RSAKeyPair
+
+    key_pair = RSAKeyPair.generate()
+    mock_auth_provider = BearerAuthProvider(
+        public_key=key_pair.public_key, audience="serper-mcp-server"
+    )
+    
+    with patch("serper_mcp_server_secure.auth_provider", mock_auth_provider):
+        if not os.getenv(SERPER_API_KEY_ENV_VAR):
+            os.environ[SERPER_API_KEY_ENV_VAR] = "test_api_key_value"
+        yield mcp
+
+@pytest.mark.asyncio
+async def test_secure_scrape_url_tool_success(secure_mcp_server_instance):
+    """
+    Tests the secure scrape_url tool for a successful scrape with valid auth.
+    """
+    mcp_instance = secure_mcp_server_instance
+    expected_markdown = "## Secure Scraped Content"
+    full_api_response = {"markdown": expected_markdown}
+
+    with patch("serper_mcp_server_secure.scrape_serper_url") as mock_scrape, \
+         patch("serper_mcp_server_secure.get_access_token") as mock_get_token:
+        
+        from fastmcp.server.dependencies import AccessToken
+        mock_get_token.return_value = AccessToken(token="dummy-token", client_id="test-client", scopes=["scrape:read"])
+        mock_scrape.return_value = full_api_response
+
+        from fastmcp import Client
+        
+        async with Client(mcp_instance) as client:
+            tool_result = await client.call_tool(
+                "scrape_url", {"url": "https://example.com/secure-page"}
+            )
+            assert tool_result is not None
+            assert len(tool_result) == 1
+            assert tool_result[0].type == "text"
+            assert tool_result[0].text == expected_markdown
+
+        mock_scrape.assert_called_once()
+        call_args = mock_scrape.call_args[1]
+        assert call_args['url_to_scrape'] == "https://example.com/secure-page"
+
+
+@pytest.mark.asyncio
+async def test_secure_scrape_url_tool_auth_error(secure_mcp_server_instance):
+    """
+    Tests the secure scrape_url tool for a failure due to missing auth scope.
+    """
+    mcp_instance = secure_mcp_server_instance
+    with patch("serper_mcp_server_secure.scrape_serper_url") as mock_scrape, \
+         patch("serper_mcp_server_secure.get_access_token") as mock_get_token:
+
+        from fastmcp.server.dependencies import AccessToken
+        # Token is missing the required 'scrape:read' scope
+        mock_get_token.return_value = AccessToken(token="dummy-token", client_id="test-client", scopes=["search:read"])
+
+        from fastmcp import Client
+        from fastmcp.exceptions import ToolError
+
+        async with Client(mcp_instance) as client:
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "scrape_url", {"url": "https://example.com/secure-page"}
+                )
+            
+            assert exc_info.type is ToolError
+        
+        mock_scrape.assert_not_called()
