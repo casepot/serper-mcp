@@ -1,8 +1,13 @@
+from dotenv import load_dotenv
+
+load_dotenv()
 import asyncio
 import http.client
 import json
 import os
-import argparse # Added for command-line arguments
+import argparse  # Added for command-line arguments
+import re
+import html
 from typing import Optional, Dict, Any, Union, Literal, cast, Annotated
 
 from pydantic import Field
@@ -99,6 +104,41 @@ def _make_serper_request(
         )
 
 
+def _transform_github_url_to_raw(url: str) -> str:
+    """
+    Transforms a standard GitHub file URL into its raw.githubusercontent.com equivalent.
+    If the URL is not a match, it returns the original URL.
+    
+    Example:
+        "https://github.com/owner/repo/blob/main/README.md"
+    Becomes:
+        "https://raw.githubusercontent.com/owner/repo/main/README.md"
+    """
+    # Regex to capture the owner, repo, branch, and file path from a GitHub URL
+    github_pattern = r"https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)"
+    match = re.match(github_pattern, url)
+    
+    if match:
+        owner, repo, branch, file_path = match.groups()
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
+        return raw_url
+        
+    return url
+ 
+def _clean_markdown(markdown: str) -> str:
+    """
+    Cleans the scraped markdown content to be more LLM-friendly.
+    - Unescapes HTML entities (e.g., & -> &).
+    """
+    if not isinstance(markdown, str):
+        return ""
+    # 1. Unescape HTML entities like &, <, etc.
+    cleaned_markdown = html.unescape(markdown)
+    # 2. Remove backslash escapes from common markdown characters.
+    # This handles cases like \*, \_, \[, \], etc.
+    cleaned_markdown = re.sub(r'\\([!\"#$%&\'()*+,-./:;<=>?@\[\\\]^_`{|}~])', r'\1', cleaned_markdown)
+    return cleaned_markdown
+ 
 # --- Public API Functions (from user provided code) ---
 def query_serper_api(
     query_text: str,
@@ -172,10 +212,10 @@ Tool annotations like 'readOnlyHint': true, 'idempotentHint': true, 'openWorldHi
 async def google_search(
     ctx: Context,
     query: Annotated[str, Field(description="The search term or question.")],
-    location: Annotated[Optional[str], Field(description="The location for the search (e.g., \"United States\", \"London, United Kingdom\).")] = None,
+    location: Annotated[Optional[str], Field(description='The location for the search (e.g., "United States", "London, United Kingdom").')] = None,
     num_results: Annotated[Optional[int], Field(description="Number of results to return (e.g., 10, 20, default is usually 10).")] = None,
     autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection. Serper's default for this client is False if not specified.")] = None,
-    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter (e.g., \"qdr:h\" for past hour, \"qdr:d\" for past day, \"qdr:w\" for past week). Corresponds to the 'tbs' parameter.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter (e.g., "qdr:h" for past hour, "qdr:d" for past day, "qdr:w" for past week). Corresponds to the \'tbs\' parameter.')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of results to fetch (e.g., 1, 2).")] = None,
 ) -> Dict[str, Any]:
     """
@@ -218,11 +258,11 @@ async def google_search(
 @mcp.tool()
 async def news_search(
     ctx: Context,
-    query: Annotated[str, Field(description="The news search term (e.g., \"latest AI advancements\", \"tech earnings\").")],
-    location: Annotated[Optional[str], Field(description="The location for the news search (e.g., \"United States\").")] = None,
+    query: Annotated[str, Field(description='The news search term (e.g., "latest AI advancements", "tech earnings").')],
+    location: Annotated[Optional[str], Field(description='The location for the news search (e.g., "United States").')] = None,
     num_results: Annotated[Optional[int], Field(description="Number of news articles to return.")] = None,
     autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection.")] = None,
-    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter (e.g., \"qdr:h1\" for past hour, \"qdr:d1\" for past day).")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter (e.g., "qdr:h1" for past hour, "qdr:d1" for past day).')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of news results to fetch.")] = None,
 ) -> Dict[str, Any]:
     """
@@ -264,9 +304,9 @@ async def news_search(
 @mcp.tool()
 async def scholar_search(
     ctx: Context,
-    query: Annotated[str, Field(description="The scholar search term (e.g., \"quantum computing algorithms\", \"machine learning in healthcare\").")],
+    query: Annotated[str, Field(description='The scholar search term (e.g., "quantum computing algorithms", "machine learning in healthcare").')],
     num_results: Annotated[Optional[int], Field(description="Number of scholar articles to return.")] = None,
-    time_period_filter: Annotated[Optional[str], Field(description="Time-based search filter for scholar articles (e.g., \"as_ylo=2020\" for articles from 2020 onwards). Corresponds to 'tbs'.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter for scholar articles (e.g., "as_ylo=2020" for articles from 2020 onwards). Corresponds to \'tbs\'.')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of scholar results to fetch.")] = None,
 ) -> Dict[str, Any]:
     """
@@ -309,6 +349,7 @@ async def scrape_url(
 ) -> str:
     """
     Fetches and extracts the Markdown content from a given URL.
+    If a GitHub file URL is provided, it will be automatically converted to its raw version for scraping.
     This tool uses the Serper.dev Scrape API to get the content.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only and interacts with the open web.
@@ -319,18 +360,26 @@ async def scrape_url(
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
-        await ctx.info(f"scrape_url called with url: '{url}'")
+        await ctx.info(f"scrape_url called with original url: '{url}'")
+        
+        # Transform GitHub URLs to their raw equivalent
+        transformed_url = _transform_github_url_to_raw(url)
+        if transformed_url != url:
+            await ctx.info(f"Transformed GitHub URL to: '{transformed_url}'")
+
         # The scrape_serper_url function handles the actual API call.
-        # We ensure include_markdown is True as required.
         response_data = scrape_serper_url(
-            url_to_scrape=url,
+            url_to_scrape=transformed_url,
             api_key=None,  # Ensures environment variable is used
             include_markdown=True,
         )
 
         # Per the requirement, we only return the 'markdown' field.
         markdown_content = response_data.get("markdown", "")
-        return markdown_content
+        
+        # Clean the markdown to remove unnecessary escapes
+        cleaned_markdown = _clean_markdown(markdown_content)
+        return cleaned_markdown
 
     except SerperApiClientError as e:
         await ctx.error(f"Serper API error in scrape_url for url '{url}': {e}")

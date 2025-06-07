@@ -4,9 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp==2.6.1"
+    "fastmcp==2.6.1",
+    "python-dotenv"
 ]
 
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [dependency-groups]
 dev = [

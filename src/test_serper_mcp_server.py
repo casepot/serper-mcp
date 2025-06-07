@@ -422,10 +422,14 @@ async def test_scrape_url_tool_success(mcp_server_instance):
     Tests the scrape_url tool for a successful scrape.
     This test mocks the underlying 'scrape_serper_url' to avoid actual API calls.
     """
-    expected_markdown = "## Scraped Content\n\nThis is the markdown."
+    # Simulate a raw response with HTML entities and backslash escapes
+    raw_markdown_from_api = "## Scraped Content<br>\n\nThis is a \\*test\\* with \\_escapes\\_ and & an ampersand."
+    # The expected output after cleaning
+    expected_cleaned_markdown = "## Scraped Content<br>\n\nThis is a *test* with _escapes_ and & an ampersand."
+    
     full_api_response = {
         "text": "Scraped Content...",
-        "markdown": expected_markdown,
+        "markdown": raw_markdown_from_api,
         "metadata": {"title": "Scraped Page"},
         "credits": 1,
     }
@@ -443,8 +447,8 @@ async def test_scrape_url_tool_success(mcp_server_instance):
             assert tool_result is not None
             assert len(tool_result) == 1
             assert tool_result[0].type == "text"
-            # The tool should return the raw markdown string directly
-            assert tool_result[0].text == expected_markdown
+            # The tool should return the cleaned markdown string
+            assert tool_result[0].text == expected_cleaned_markdown
 
             mock_scrape_serper_url.assert_called_once_with(
                 url_to_scrape="http://example.com/scrape-me",
@@ -475,6 +479,42 @@ async def test_scrape_url_tool_api_error(mcp_server_instance):
             assert "Error calling tool 'scrape_url'" in str(exc_info.value)
             mock_scrape_serper_url.assert_called_once_with(
                 url_to_scrape="http://example.com/scrape-error",
+                api_key=None,
+                include_markdown=True,
+            )
+
+@pytest.mark.asyncio
+async def test_scrape_url_tool_with_github_url_transformation(mcp_server_instance):
+    """
+    Tests that the scrape_url tool correctly transforms a GitHub URL
+    before calling the underlying scrape function.
+    """
+    original_github_url = "https://github.com/some-user/some-repo/blob/main/docs/README.md"
+    expected_raw_url = "https://raw.githubusercontent.com/some-user/some-repo/main/docs/README.md"
+    # Simulate a raw response with HTML entities from a GitHub file
+    raw_markdown_from_api = "### Title with & special chars"
+    expected_cleaned_markdown = "### Title with & special chars"
+    
+    full_api_response = {"markdown": raw_markdown_from_api}
+
+    with patch("serper_mcp_server.scrape_serper_url") as mock_scrape_serper_url:
+        mock_scrape_serper_url.return_value = full_api_response
+
+        from fastmcp import Client
+
+        async with Client(mcp_server_instance) as client:
+            tool_result = await client.call_tool(
+                "scrape_url", {"url": original_github_url}
+            )
+
+            assert tool_result is not None
+            assert len(tool_result) == 1
+            assert tool_result[0].type == "text"
+            assert tool_result[0].text == expected_cleaned_markdown
+
+            # Verify that the scraper was called with the *transformed* URL
+            mock_scrape_serper_url.assert_called_once_with(
+                url_to_scrape=expected_raw_url,
                 api_key=None,
                 include_markdown=True,
             )
