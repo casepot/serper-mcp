@@ -670,6 +670,117 @@ def _resolve_entities_with_splink(
     return final_mapping
 
 
+def _is_valid_entity(entity_name: str) -> bool:
+    """Filter out low-quality entities."""
+    if not entity_name or len(entity_name) < 3:
+        return False
+    
+    # Filter out common noise patterns
+    noise_patterns = [
+        r'^\d+\.',  # List markers like "1.", "2."
+        r'^\d+%$',  # Percentages like "21.3%"
+        r'^\d+$',   # Pure numbers
+        r'^[a-zA-Z]$',  # Single letters
+    ]
+    
+    for pattern in noise_patterns:
+        if re.match(pattern, entity_name.strip()):
+            return False
+    
+    # Filter out common stopwords/generic terms
+    stopwords = {
+        'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with',
+        'by', 'from', 'up', 'about', 'into', 'through', 'during', 'before',
+        'after', 'above', 'below', 'between', 'among', 'this', 'that', 'these',
+        'those', 'it', 'they', 'them', 'their', 'there', 'here', 'where', 'when',
+        'increase', 'improve', 'develop', 'support', 'related', 'concept', 'thing'
+    }
+    
+    if entity_name.lower().strip() in stopwords:
+        return False
+        
+    return True
+
+def _linearize_graph_for_llm(graph: nx.DiGraph) -> str:
+    """
+    Serializes the graph into a centrality-ordered string for LLM consumption.
+    """
+    if not graph.nodes:
+        return "The knowledge graph is empty."
+
+    # Sort nodes by degree centrality
+    sorted_nodes = sorted(
+        graph.nodes(data=True),
+        key=lambda x: x[1].get('centrality', {}).get('degree', 0),
+        reverse=True
+    )
+
+    linearized_representation = []
+    linearized_representation.append("### Knowledge Graph Summary (Ordered by Importance)\n")
+
+    for node, data in sorted_nodes:
+        node_info = f"- **Entity:** {node} (Type: {data.get('type', 'Unknown')})"
+        linearized_representation.append(node_info)
+
+        # Add outgoing relationships
+        outgoing_edges = list(graph.out_edges(node, data=True))
+        if outgoing_edges:
+            linearized_representation.append("  - **Connects To:**")
+            for _, target, edge_data in outgoing_edges:
+                linearized_representation.append(f"    - {edge_data.get('label', 'related to')} -> {target} (Strength: {edge_data.get('weight', 0):.2f})")
+
+        # Add incoming relationships
+        incoming_edges = list(graph.in_edges(node, data=True))
+        if incoming_edges:
+            linearized_representation.append("  - **Is Connected From:**")
+            for source, _, edge_data in incoming_edges:
+                linearized_representation.append(f"    - {source} -> {edge_data.get('label', 'related to')} (Strength: {edge_data.get('weight', 0):.2f})")
+    
+    return "\n".join(linearized_representation)
+
+async def _summarize_entity(
+    ctx: Context,
+    openai_client: openai.AsyncOpenAI,
+    i: int,
+    total_nodes: int,
+    node_data: tuple,
+    graph_context: str
+) -> Optional[dict]:
+    """Summarize a single entity asynchronously using the linearized graph context."""
+    node, data = node_data
+    try:
+        await ctx.info(f"Summarizing entity {i+1}/{total_nodes}: {node}")
+        
+        prompt = f"""Given the following knowledge graph summary:
+
+{graph_context}
+
+Provide a concise 2-3 sentence summary of the entity '{node}', focusing on its role, significance, and key relationships within the topic.
+Do not simply list its connections; synthesize the information into a coherent description."""
+
+        await ctx.info(f"Making OpenAI API call for entity summary {i+1} (model: gpt-4.1-nano)")
+        response = await openai_client.chat.completions.create(
+            model="gpt-4.1-nano",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that summarizes entities from a knowledge graph."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        await ctx.info(f"OpenAI API call completed for entity summary {i+1}")
+        
+        if response.choices and response.choices[0].message.content:
+            await ctx.info(f"Successfully summarized entity {i+1}: {node}")
+            return {
+                "entity": node,
+                "summary": response.choices[0].message.content
+            }
+        else:
+            await ctx.warning(f"No response content for entity {node}")
+            return None
+    except Exception as e:
+        await ctx.warning(f"Failed to summarize entity {node}. Reason: {e}")
+        return None
+
 @mcp.tool()
 async def analyze_topic(
     ctx: Context,
@@ -685,7 +796,8 @@ async def analyze_topic(
     """
     Provides a comprehensive, multi-layered analysis of a given topic by dynamically building and querying a knowledge graph from web search results.
     """
-    await ctx.info(f"Starting topic analysis for query: '{query}'")
+    original_query = query
+    await ctx.info(f"Starting topic analysis for query: '{original_query}'")
 
     # Phase 1: Document Collection & Ingestion
     await ctx.info("Phase 1: Kicking off document collection with super_search.")
@@ -694,7 +806,7 @@ async def analyze_topic(
     # to smoke test the first part of the pipeline.
     search_results = await super_search(
         ctx=ctx,
-        queries=[query],
+        queries=[original_query],
         search_types=search_types,
         max_depth=search_depth,
         # Limiting related searches for now to keep the initial run focused.
@@ -754,112 +866,200 @@ async def analyze_topic(
     
     await ctx.info(f"Completed parallel scraping: {len(scraped_content)} successful scrapes")
 
-    # Phase 3: Text Chunking
-    await ctx.info("Phase 3: Starting text chunking.")
-    
-    chunks = []
-    for doc in scraped_content:
-        document_text = doc.get("content", "")
-        if not document_text:
-            continue
-        
-        for i in range(0, len(document_text), chunk_size - chunk_overlap):
-            chunk_text = document_text[i:i + chunk_size]
-            chunks.append({
-                "text": chunk_text,
-                "source_url": doc.get("url")
-            })
-
-    # Phase 4: Knowledge Extraction
-    await ctx.info("Phase 4: Starting knowledge extraction.")
+    # Phase 3: Document-Level Knowledge Extraction
+    await ctx.info("Phase 3: Starting document-level knowledge extraction.")
 
     if not os.getenv("OPENAI_API_KEY"):
         await ctx.error("OPENAI_API_KEY environment variable not set.")
         return {"status": "Error", "message": "OPENAI_API_KEY not set."}
-    
+
     try:
         openai_client = openai.AsyncOpenAI()
     except openai.OpenAIError as e:
         await ctx.error(f"Error initializing OpenAI client: {e}. Please ensure your OPENAI_API_KEY is valid.")
         return {"status": "Error", "message": f"OpenAI client initialization failed: {e}"}
 
-    extracted_elements = []
-    await ctx.info(f"Starting parallel knowledge extraction from {len(chunks)} chunks")
+    # --- RHF (Relation-Head-Facts) Pipeline ---
     
-    async def extract_from_chunk(i: int, chunk: dict) -> Optional[dict]:
-        """Extract knowledge from a single chunk asynchronously."""
-        try:
-            await ctx.info(f"Processing chunk {i+1}/{len(chunks)} from {chunk.get('source_url', 'unknown')}")
-            
-            prompt = f"""Extract entities and relationships from the following text.
-Focus on: {allowed_entity_types}
-
-Use this exact format for each relationship:
-Parsed relationship: Entity1 -> Relationship -> Entity2 [strength: X.X]
-
-Where strength is between 0.0 (very weak) and 1.0 (very strong).
-Use common relationship types: 'related to', 'depends on', 'influences', 'works for', 'located in', 'develops', 'part of'.
-
-Text: {chunk['text']}"""
-
-            await ctx.info(f"Making OpenAI API call for chunk {i+1} (model: gpt-4.1-mini)")
-            response = await openai_client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that extracts information from text."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            await ctx.info(f"OpenAI API call completed for chunk {i+1}")
-            
-            if response.choices:
-                await ctx.info(f"Successfully extracted knowledge from chunk {i+1}")
-                return {
-                    "source_url": chunk['source_url'],
-                    "extracted_text": response.choices[0].message.content
+    async def _run_rhf_pipeline_on_document(document_text: str) -> List[Dict[str, Any]]:
+        """Runs the full RHF pipeline on a single document and returns extracted relationships."""
+        
+        # Step 1: Extract Relations
+        await ctx.info("RHF Step 1: Extracting relations from document.")
+        relations_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "store_relations",
+                    "description": "Stores the extracted semantic relation types.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"relations": {"type": "array", "items": {"type": "string"}}},
+                        "required": ["relations"]
+                    }
                 }
-            else:
-                await ctx.warning(f"No response content for chunk {i+1}")
-                return None
+            }
+        ]
+        relations_prompt = f"""Given the document, identify all unique semantic relation types.
+Examples: 'works for', 'located in', 'develops', 'CEO of'.
+Return only the relation types, not the entities.
+
+DOCUMENT:
+{document_text}"""
+        
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[
+                    {"role": "system", "content": "You are an expert in identifying relationship types."},
+                    {"role": "user", "content": relations_prompt}
+                ],
+                tools=cast(Any, relations_tools),
+                tool_choice={"type": "function", "function": {"name": "store_relations"}}
+            )
+            if not (response.choices and response.choices[0].message.tool_calls):
+                await ctx.warning("RHF Step 1: No relations found in document.")
+                return []
+            
+            tool_call = response.choices[0].message.tool_calls[0]
+            if tool_call.function.name != "store_relations":
+                return []
+                
+            all_relations = json.loads(tool_call.function.arguments).get("relations", [])
+            if not all_relations:
+                return []
         except Exception as e:
-            await ctx.warning(f"Failed to extract knowledge from chunk {i+1}. Reason: {e}")
-            return None
-    
-    # Process all chunks in parallel using asyncio.gather
-    extraction_tasks = [extract_from_chunk(i, chunk) for i, chunk in enumerate(chunks)]
-    extraction_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
-    
-    # Filter out None results and exceptions
-    for result in extraction_results:
-        if result is not None and not isinstance(result, Exception):
-            extracted_elements.append(result)
-    
-    await ctx.info(f"Completed parallel knowledge extraction: {len(extracted_elements)} successful extractions")
+            await ctx.error(f"RHF Step 1 failed: {e}")
+            return []
+
+        document_relationships = []
+        
+        # Step 2 & 3: Extract Head Entities and Facts for each relation
+        for relation in all_relations:
+            await ctx.info(f"RHF Step 2: Extracting head entities for relation: '{relation}'")
+            heads_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "store_head_entities",
+                        "description": "Stores extracted head entities for a relation.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"head_entities": {"type": "array", "items": {"type": "string"}}},
+                            "required": ["head_entities"]
+                        }
+                    }
+                }
+            ]
+            heads_prompt = f"""Given the document and the relation '{relation}', list all subject entities.
+
+DOCUMENT:
+{document_text}"""
+            
+            try:
+                response = await openai_client.chat.completions.create(
+                    model="gpt-4.1-nano",
+                    messages=[
+                        {"role": "system", "content": "You are an expert in identifying subject entities."},
+                        {"role": "user", "content": heads_prompt}
+                    ],
+                    tools=cast(Any, heads_tools),
+                    tool_choice={"type": "function", "function": {"name": "store_head_entities"}}
+                )
+                if not (response.choices and response.choices[0].message.tool_calls):
+                    continue
+                
+                tool_call = response.choices[0].message.tool_calls[0]
+                if tool_call.function.name != "store_head_entities":
+                    continue
+                    
+                head_entities = json.loads(tool_call.function.arguments).get("head_entities", [])
+            except Exception as e:
+                await ctx.error(f"RHF Step 2 failed for relation '{relation}': {e}")
+                continue
+
+            for head in head_entities:
+                await ctx.info(f"RHF Step 3: Extracting facts for ('{head}', '{relation}', ?)")
+                facts_tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "store_facts",
+                            "description": "Stores extracted facts (tail entities and types).",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "facts": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "tail_entity": {"type": "string"},
+                                                "tail_entity_type": {"type": "string", "enum": allowed_entity_types}
+                                            },
+                                            "required": ["tail_entity", "tail_entity_type"]
+                                        }
+                                    }
+                                },
+                                "required": ["facts"]
+                            }
+                        }
+                    }
+                ]
+                facts_prompt = f"""From the document, identify all tail entities that have the relation '{relation}' with the head entity '{head}'.
+
+DOCUMENT:
+{document_text}"""
+                
+                try:
+                    response = await openai_client.chat.completions.create(
+                        model="gpt-4.1-nano",
+                        messages=[
+                            {"role": "system", "content": "You are an expert in extracting structured facts."},
+                            {"role": "user", "content": facts_prompt}
+                        ],
+                        tools=cast(Any, facts_tools),
+                        tool_choice={"type": "function", "function": {"name": "store_facts"}}
+                    )
+                    if not (response.choices and response.choices[0].message.tool_calls):
+                        continue
+                        
+                    tool_call = response.choices[0].message.tool_calls[0]
+                    if tool_call.function.name != "store_facts":
+                        continue
+                        
+                    facts = json.loads(tool_call.function.arguments).get("facts", [])
+                    
+                    for fact in facts:
+                        tail_entity = fact.get("tail_entity")
+                        if tail_entity and _is_valid_entity(head) and _is_valid_entity(tail_entity):
+                            document_relationships.append({
+                                "source": head,
+                                "source_type": "Unknown",
+                                "target": tail_entity,
+                                "target_type": fact.get("tail_entity_type", "Unknown"),
+                                "relationship": relation,
+                                "strength": 0.8
+                            })
+                except Exception as e:
+                    await ctx.error(f"RHF Step 3 failed for ('{head}', '{relation}', ?): {e}")
+        
+        return document_relationships
+
+    # --- Execute RHF Pipeline for each document ---
+    parsed_relationships = []
+    for i, doc in enumerate(scraped_content):
+        content = doc.get("content")
+        if content:
+            await ctx.info(f"--- Running RHF Pipeline on Document {i+1}/{len(scraped_content)} ---")
+            relationships = await _run_rhf_pipeline_on_document(content)
+            parsed_relationships.extend(relationships)
+            await ctx.info(f"--- Extracted {len(relationships)} relationships from Document {i+1} ---")
+
+    await ctx.info(f"Completed RHF pipeline across all documents. Extracted {len(parsed_relationships)} total relationships.")
 
     # Phase 4.5: Entity Resolution
     await ctx.info("Phase 4.5: Starting entity resolution.")
-    
-    # First, parse all extracted relationships into a flat list
-    parsed_relationships = []
-    for element in extracted_elements:
-        for line in element.get("extracted_text", "").split("\n"):
-            if "->" in line:
-                parts = line.split("->")
-                if len(parts) >= 2:
-                    source = parts[0].replace("Parsed relationship:", "").strip()
-                    target_part = parts[-1]
-                    
-                    relationship_match = re.search(r"(.+?)\[strength:\s*(\d\.\d)\]", target_part)
-                    if relationship_match:
-                        target = relationship_match.group(1).strip()
-                        strength = float(relationship_match.group(2))
-                        relationship = parts[1].strip() if len(parts) > 2 else "related_to"
-                        parsed_relationships.append({
-                            "source": source,
-                            "target": target,
-                            "relationship": relationship,
-                            "strength": strength
-                        })
 
     canonical_entity_map = _resolve_entities_with_splink(parsed_relationships)
     await ctx.info(f"Resolved {len(parsed_relationships)} relationships into {len(set(canonical_entity_map.values()))} canonical entities.")
@@ -873,9 +1073,24 @@ Text: {chunk['text']}"""
         source_canonical = canonical_entity_map.get(rel['source'], rel['source'])
         target_canonical = canonical_entity_map.get(rel['target'], rel['target'])
 
-        # Add nodes with attributes
-        G.add_node(source_canonical, type="Unknown")
-        G.add_node(target_canonical, type="Unknown")
+        # Add nodes with extracted entity types
+        source_type = rel.get('source_type', 'Unknown')
+        target_type = rel.get('target_type', 'Unknown')
+        
+        # If node already exists, keep the most specific type (not "Unknown")
+        if source_canonical in G.nodes:
+            existing_type = G.nodes[source_canonical].get('type', 'Unknown')
+            if existing_type == 'Unknown' and source_type != 'Unknown':
+                G.nodes[source_canonical]['type'] = source_type
+        else:
+            G.add_node(source_canonical, type=source_type)
+            
+        if target_canonical in G.nodes:
+            existing_type = G.nodes[target_canonical].get('type', 'Unknown')
+            if existing_type == 'Unknown' and target_type != 'Unknown':
+                G.nodes[target_canonical]['type'] = target_type
+        else:
+            G.add_node(target_canonical, type=target_type)
         
         # Add edge with attributes
         G.add_edge(
@@ -909,48 +1124,12 @@ Text: {chunk['text']}"""
     
     top_nodes = sorted_nodes[:5]  # Summarize top 5 nodes
     await ctx.info(f"Starting parallel summarization of top {len(top_nodes)} entities")
-    
-    async def summarize_entity(i: int, node_data: tuple) -> Optional[dict]:
-        """Summarize a single entity asynchronously."""
-        node, data = node_data
-        try:
-            await ctx.info(f"Summarizing entity {i+1}/{len(top_nodes)}: {node}")
-            
-            # Gather context for the summary
-            connections = list(G.neighbors(node))
-            
-            prompt = f"""Based on the following information about entity '{node}':
 
-Connections: {connections}
-Centrality scores: {data['centrality']}
-
-Provide a concise 2-3 sentence summary of this entity's role and significance in the topic."""
-
-            await ctx.info(f"Making OpenAI API call for entity summary {i+1} (model: gpt-4.1-nano)")
-            response = await openai_client.chat.completions.create(
-                model="gpt-4.1-nano",
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that summarizes information about entities."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            await ctx.info(f"OpenAI API call completed for entity summary {i+1}")
-            
-            if response.choices:
-                await ctx.info(f"Successfully summarized entity {i+1}: {node}")
-                return {
-                    "entity": node,
-                    "summary": response.choices[0].message.content
-                }
-            else:
-                await ctx.warning(f"No response content for entity {node}")
-                return None
-        except Exception as e:
-            await ctx.warning(f"Failed to summarize entity {node}. Reason: {e}")
-            return None
+    # Linearize the graph for context
+    graph_context_for_llm = _linearize_graph_for_llm(G)
     
     # Process all entity summaries in parallel using asyncio.gather
-    summary_tasks = [summarize_entity(i, node_data) for i, node_data in enumerate(top_nodes)]
+    summary_tasks = [_summarize_entity(ctx, openai_client, i, len(top_nodes), node_data, graph_context_for_llm) for i, node_data in enumerate(top_nodes)]
     summary_results = await asyncio.gather(*summary_tasks, return_exceptions=True)
     
     # Filter out None results and exceptions
@@ -992,10 +1171,10 @@ Provide a concise 2-3 sentence summary of this entity's role and significance in
     ]
 
     return {
-        "query": query,
+        "query": original_query,
         "processing_stats": {
             "urls_scraped": len(scraped_content),
-            "chunks_processed": len(chunks),
+            "documents_processed": len(scraped_content),
             "entities_extracted": len(G.nodes),
             "relationships_found": len(G.edges),
             "communities_detected": 0  # Placeholder for now
