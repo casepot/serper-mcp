@@ -18,8 +18,7 @@ import openai
 import networkx as nx
 import pandas as pd
 from pydantic import Field
-from splink.duckdb.linker import DuckDBLinker
-import splink.comparison_library as cl
+import difflib
 from fastmcp import FastMCP, Context
 
 # --- OpenAI Client ---
@@ -570,8 +569,9 @@ def _resolve_entities_with_splink(
     extracted_relationships: List[Dict[str, Any]]
 ) -> Dict[str, str]:
     """
-    Uses Splink to perform entity resolution and returns a mapping from
-    original entity names to a canonical name.
+    Uses string similarity to perform entity resolution and returns a mapping from
+    original entity names to a canonical name. This is a simpler, more reliable
+    approach than complex probabilistic record linkage for our use case.
     """
     unique_entities = set()
     for item in extracted_relationships:
@@ -581,49 +581,92 @@ def _resolve_entities_with_splink(
     if not unique_entities:
         return {}
 
-    # Create a DataFrame for Splink
-    df = pd.DataFrame(list(unique_entities), columns=['original_name'])
-    df['unique_id'] = range(len(df))
-
-    settings = {
-        "link_type": "dedupe_only",
-        "blocking_rules_to_generate_predictions": [],
-        "comparisons": [
-            cl.jaro_winkler_at_thresholds("original_name", [0.9, 0.8],)
-        ],
-        "retain_matching_columns": True,
-        "retain_intermediate_calculation_columns": True,
-    }
-
-    linker = DuckDBLinker(df, settings)
-    linker.estimate_u_using_random_sampling(max_pairs=1e6)
-
-    blocking_rule_for_training = "l.original_name = r.original_name"
-    linker.estimate_parameters_using_expectation_maximisation(blocking_rule_for_training)
-
-    blocking_rule_for_training = "l.original_name[1] = r.original_name[1]"
-    linker.estimate_parameters_using_expectation_maximisation(blocking_rule_for_training)
-
-    df_clusters = linker.predict_and_cluster(threshold_match_probability=0.8)
+    entities_list = list(unique_entities)
+    canonical_mapping = {}
     
-    # Process clusters to create the canonical map
+    # Initialize each entity to map to itself
+    for entity in entities_list:
+        canonical_mapping[entity] = entity
+    
+    # Use Union-Find data structure to group similar entities
+    def find_canonical(entity):
+        if canonical_mapping[entity] != entity:
+            canonical_mapping[entity] = find_canonical(canonical_mapping[entity])
+        return canonical_mapping[entity]
+    
+    def union_entities(entity1, entity2):
+        canonical1 = find_canonical(entity1)
+        canonical2 = find_canonical(entity2)
+        
+        if canonical1 != canonical2:
+            # Choose the longer name as the canonical representative
+            if len(canonical1) >= len(canonical2):
+                canonical_mapping[canonical2] = canonical1
+            else:
+                canonical_mapping[canonical1] = canonical2
+    
+    # Compare all pairs of entities for similarity
+    for i in range(len(entities_list)):
+        for j in range(i + 1, len(entities_list)):
+            entity1 = entities_list[i]
+            entity2 = entities_list[j]
+            
+            # Normalize for comparison (lowercase, strip whitespace)
+            norm1 = entity1.lower().strip()
+            norm2 = entity2.lower().strip()
+            
+            # Calculate similarity using different metrics
+            sequence_similarity = difflib.SequenceMatcher(None, norm1, norm2).ratio()
+            
+            # Check for various matching patterns
+            is_similar = False
+            
+            # High sequence similarity
+            if sequence_similarity >= 0.85:
+                is_similar = True
+            
+            # One is a substring of the other (after normalization)
+            elif norm1 in norm2 or norm2 in norm1:
+                # But only if the shorter one is at least 3 characters and
+                # represents at least 60% of the longer one
+                shorter_len = min(len(norm1), len(norm2))
+                longer_len = max(len(norm1), len(norm2))
+                if shorter_len >= 3 and shorter_len / longer_len >= 0.6:
+                    is_similar = True
+            
+            # Similar after removing common prefixes/suffixes like "The", "Sir", etc.
+            else:
+                # Remove common prefixes and suffixes
+                prefixes_to_remove = ['the ', 'sir ', 'dr ', 'prof ', 'mr ', 'ms ', 'mrs ']
+                suffixes_to_remove = [' inc', ' corp', ' company', ' ltd', ' llc']
+                
+                clean1 = norm1
+                clean2 = norm2
+                
+                for prefix in prefixes_to_remove:
+                    if clean1.startswith(prefix):
+                        clean1 = clean1[len(prefix):]
+                    if clean2.startswith(prefix):
+                        clean2 = clean2[len(prefix):]
+                
+                for suffix in suffixes_to_remove:
+                    if clean1.endswith(suffix):
+                        clean1 = clean1[:-len(suffix)]
+                    if clean2.endswith(suffix):
+                        clean2 = clean2[:-len(suffix)]
+                
+                clean_similarity = difflib.SequenceMatcher(None, clean1, clean2).ratio()
+                if clean_similarity >= 0.9:
+                    is_similar = True
+            
+            if is_similar:
+                union_entities(entity1, entity2)
+    
+    # Ensure all entities point to their canonical representative
     final_mapping = {}
-    cluster_to_canonical = {}
+    for entity in entities_list:
+        final_mapping[entity] = find_canonical(entity)
     
-    # Convert to dictionary for easier lookup
-    clusters_df = df_clusters.as_pandas_dataframe()
-    
-    # Find the best canonical name for each cluster_id
-    for cluster_id in clusters_df['cluster_id'].unique():
-        cluster_nodes = clusters_df[clusters_df['cluster_id'] == cluster_id]
-        # Choose the longest name as the canonical name for the cluster
-        canonical_name = max(cluster_nodes['original_name'], key=len)
-        cluster_to_canonical[cluster_id] = canonical_name
-
-    # Create the final mapping from any original name to the chosen canonical name
-    for _, row in clusters_df.iterrows():
-        final_mapping[row['original_name']] = cluster_to_canonical[row['cluster_id']]
-
     return final_mapping
 
 
@@ -680,14 +723,36 @@ async def analyze_topic(
     await ctx.info(f"Found {len(urls_to_scrape)} unique URLs to scrape.")
 
     scraped_content = []
-    for url in urls_to_scrape:
-        if url:
-            try:
-                content = await scrape_url(ctx, url)
-                if content:
-                    scraped_content.append({"url": url, "content": content})
-            except Exception as e:
-                await ctx.warning(f"Failed to scrape URL: {url}. Reason: {e}")
+    urls_list = list(urls_to_scrape)
+    await ctx.info(f"Starting parallel scraping of {len(urls_list)} URLs")
+    
+    async def scrape_single_url(i: int, url: str) -> Optional[dict]:
+        """Scrape a single URL asynchronously."""
+        if not url:
+            return None
+        try:
+            await ctx.info(f"Scraping URL {i+1}/{len(urls_list)}: {url}")
+            content = await scrape_url(ctx, url)
+            if content:
+                await ctx.info(f"Successfully scraped URL {i+1}: {len(content)} characters")
+                return {"url": url, "content": content}
+            else:
+                await ctx.warning(f"URL {i+1} returned empty content: {url}")
+                return None
+        except Exception as e:
+            await ctx.warning(f"Failed to scrape URL {i+1}: {url}. Reason: {e}")
+            return None
+    
+    # Process all URLs in parallel using asyncio.gather
+    scraping_tasks = [scrape_single_url(i, url) for i, url in enumerate(urls_list)]
+    scraping_results = await asyncio.gather(*scraping_tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    for result in scraping_results:
+        if result is not None and not isinstance(result, Exception):
+            scraped_content.append(result)
+    
+    await ctx.info(f"Completed parallel scraping: {len(scraped_content)} successful scrapes")
 
     # Phase 3: Text Chunking
     await ctx.info("Phase 3: Starting text chunking.")
@@ -713,14 +778,19 @@ async def analyze_topic(
         return {"status": "Error", "message": "OPENAI_API_KEY not set."}
     
     try:
-        openai_client = openai.OpenAI()
+        openai_client = openai.AsyncOpenAI()
     except openai.OpenAIError as e:
         await ctx.error(f"Error initializing OpenAI client: {e}. Please ensure your OPENAI_API_KEY is valid.")
         return {"status": "Error", "message": f"OpenAI client initialization failed: {e}"}
 
     extracted_elements = []
-    for chunk in chunks:
+    await ctx.info(f"Starting parallel knowledge extraction from {len(chunks)} chunks")
+    
+    async def extract_from_chunk(i: int, chunk: dict) -> Optional[dict]:
+        """Extract knowledge from a single chunk asynchronously."""
         try:
+            await ctx.info(f"Processing chunk {i+1}/{len(chunks)} from {chunk.get('source_url', 'unknown')}")
+            
             prompt = f"""Extract entities and relationships from the following text.
 Focus on: {allowed_entity_types}
 
@@ -732,20 +802,39 @@ Use common relationship types: 'related to', 'depends on', 'influences', 'works 
 
 Text: {chunk['text']}"""
 
-            response = openai_client.chat.completions.create(
-                model="gpt-4.1-nano",
+            await ctx.info(f"Making OpenAI API call for chunk {i+1} (model: gpt-4.1-mini)")
+            response = await openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that extracts information from text."},
                     {"role": "user", "content": prompt}
                 ]
             )
+            await ctx.info(f"OpenAI API call completed for chunk {i+1}")
+            
             if response.choices:
-                extracted_elements.append({
+                await ctx.info(f"Successfully extracted knowledge from chunk {i+1}")
+                return {
                     "source_url": chunk['source_url'],
                     "extracted_text": response.choices[0].message.content
-                })
+                }
+            else:
+                await ctx.warning(f"No response content for chunk {i+1}")
+                return None
         except Exception as e:
-            await ctx.warning(f"Failed to extract knowledge from chunk. Reason: {e}")
+            await ctx.warning(f"Failed to extract knowledge from chunk {i+1}. Reason: {e}")
+            return None
+    
+    # Process all chunks in parallel using asyncio.gather
+    extraction_tasks = [extract_from_chunk(i, chunk) for i, chunk in enumerate(chunks)]
+    extraction_results = await asyncio.gather(*extraction_tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    for result in extraction_results:
+        if result is not None and not isinstance(result, Exception):
+            extracted_elements.append(result)
+    
+    await ctx.info(f"Completed parallel knowledge extraction: {len(extracted_elements)} successful extractions")
 
     # Phase 4.5: Entity Resolution
     await ctx.info("Phase 4.5: Starting entity resolution.")
@@ -818,9 +907,15 @@ Text: {chunk['text']}"""
     # Identify top N central nodes for summarization
     sorted_nodes = sorted(G.nodes(data=True), key=lambda x: x[1]['centrality']['degree'], reverse=True)
     
-    summaries = []
-    for node, data in sorted_nodes[:5]: # Summarize top 5 nodes
+    top_nodes = sorted_nodes[:5]  # Summarize top 5 nodes
+    await ctx.info(f"Starting parallel summarization of top {len(top_nodes)} entities")
+    
+    async def summarize_entity(i: int, node_data: tuple) -> Optional[dict]:
+        """Summarize a single entity asynchronously."""
+        node, data = node_data
         try:
+            await ctx.info(f"Summarizing entity {i+1}/{len(top_nodes)}: {node}")
+            
             # Gather context for the summary
             connections = list(G.neighbors(node))
             
@@ -831,20 +926,40 @@ Centrality scores: {data['centrality']}
 
 Provide a concise 2-3 sentence summary of this entity's role and significance in the topic."""
 
-            response = openai_client.chat.completions.create(
+            await ctx.info(f"Making OpenAI API call for entity summary {i+1} (model: gpt-4.1-nano)")
+            response = await openai_client.chat.completions.create(
                 model="gpt-4.1-nano",
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that summarizes information about entities."},
                     {"role": "user", "content": prompt}
                 ]
             )
+            await ctx.info(f"OpenAI API call completed for entity summary {i+1}")
+            
             if response.choices:
-                summaries.append({
+                await ctx.info(f"Successfully summarized entity {i+1}: {node}")
+                return {
                     "entity": node,
                     "summary": response.choices[0].message.content
-                })
+                }
+            else:
+                await ctx.warning(f"No response content for entity {node}")
+                return None
         except Exception as e:
             await ctx.warning(f"Failed to summarize entity {node}. Reason: {e}")
+            return None
+    
+    # Process all entity summaries in parallel using asyncio.gather
+    summary_tasks = [summarize_entity(i, node_data) for i, node_data in enumerate(top_nodes)]
+    summary_results = await asyncio.gather(*summary_tasks, return_exceptions=True)
+    
+    # Filter out None results and exceptions
+    summaries = []
+    for result in summary_results:
+        if result is not None and not isinstance(result, Exception):
+            summaries.append(result)
+    
+    await ctx.info(f"Completed parallel summarization: {len(summaries)} successful summaries")
 
     # Phase 8: Structured Output Generation
     await ctx.info("Phase 8: Generating structured output.")
