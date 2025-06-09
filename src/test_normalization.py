@@ -1,5 +1,5 @@
 import pytest
-from src.serper_mcp_server import _resolve_entities_with_splink as _resolve_entities
+from serper_mcp_server import _resolve_entities_with_splink as _resolve_entities
 
 def test_resolve_entities_simple_clustering():
     """
