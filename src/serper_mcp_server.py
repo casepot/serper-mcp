@@ -8,8 +8,10 @@ import os
 import argparse  # Added for command-line arguments
 import re
 import html
-from typing import Optional, Dict, Any, Union, Literal, cast, Annotated
+from typing import Optional, Dict, Any, Union, Literal, cast, Annotated, List, Tuple, Set
 
+import openai
+import networkx as nx
 from pydantic import Field
 from fastmcp import FastMCP, Context
 
@@ -38,19 +40,22 @@ def _get_resolved_api_key(api_key: Optional[str]) -> str:
 
 
 def _make_serper_request(
-    host: str, path: str, payload: Dict[str, Any], api_key: Optional[str] = None
-) -> Dict[str, Any]:
+    host: str,
+    path: str,
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    api_key: Optional[str] = None,
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Makes a POST request to a Serper API endpoint.
 
     Args:
         host: The API host (e.g., "google.serper.dev").
         path: The API path (e.g., "/search" or "/").
-        payload: The JSON payload for the request.
+        payload: The JSON payload for the request. Can be a single dict or a list of dicts for batch requests.
         api_key: The Serper API key. If None, uses SERPER_API_KEY_ENV_VAR.
 
     Returns:
-        A dictionary representing the parsed JSON response.
+        A dictionary or list of dictionaries representing the parsed JSON response.
 
     Raises:
         SerperApiClientError: For API key issues, network errors,
@@ -141,7 +146,7 @@ def _clean_markdown(markdown: str) -> str:
  
 # --- Public API Functions (from user provided code) ---
 def query_serper_api(
-    query_text: str,
+    queries: Union[str, List[str]],
     api_key: Optional[str] = None,
     search_endpoint: str = "search",
     location: Optional[str] = None,
@@ -149,32 +154,40 @@ def query_serper_api(
     autocorrect: Optional[bool] = None,
     time_period_filter: Optional[str] = None,
     page_number: Optional[int] = None,
-) -> Dict[str, Any]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Queries the Serper.dev Search API (google.serper.dev for /search, /news, /scholar).
+    Can handle a single query (str) or multiple queries in a batch (List[str]).
     """
     if search_endpoint not in ["search", "news", "scholar"]:
         raise SerperApiClientError(
             f"Invalid search_endpoint: '{search_endpoint}'. Must be 'search', 'news', or 'scholar'."
         )
 
-    payload: Dict[str, Union[str, int, bool]] = {"q": query_text}
-    if location is not None:
-        payload["location"] = location
-    if num_results is not None:
-        payload["num"] = num_results
-    # Default autocorrect to False if not specified, otherwise use the provided value.
-    payload["autocorrect"] = False if autocorrect is None else autocorrect
+    def create_query_payload(query_text: str) -> Dict[str, Union[str, int, bool]]:
+        payload: Dict[str, Union[str, int, bool]] = {"q": query_text}
+        if location is not None:
+            payload["location"] = location
+        if num_results is not None:
+            payload["num"] = num_results
+        # Default autocorrect to False if not specified, otherwise use the provided value.
+        payload["autocorrect"] = False if autocorrect is None else autocorrect
 
-    if time_period_filter is not None:
-        payload["tbs"] = time_period_filter
-    if page_number is not None:
-        payload["page"] = page_number
+        if time_period_filter is not None:
+            payload["tbs"] = time_period_filter
+        if page_number is not None:
+            payload["page"] = page_number
+        return payload
+
+    if isinstance(queries, str):
+        request_payload = create_query_payload(queries)
+    else:  # It's a list of strings
+        request_payload = [create_query_payload(q) for q in queries]
 
     return _make_serper_request(
         host=SERPER_GOOGLE_SEARCH_HOST,
         path=f"/{search_endpoint}",
-        payload=payload,
+        payload=request_payload,
         api_key=api_key,
     )
 
@@ -190,9 +203,11 @@ def scrape_serper_url(
         "includeMarkdown": include_markdown,
     }
 
-    return _make_serper_request(
+    response = _make_serper_request(
         host=SERPER_SCRAPE_HOST, path="/", payload=payload, api_key=api_key
     )
+    # The scrape API does not support batching, so the response is always a dictionary.
+    return cast(Dict[str, Any], response)
 
 
 # --- FastMCP Server Definition ---
@@ -211,29 +226,29 @@ Tool annotations like 'readOnlyHint': true, 'idempotentHint': true, 'openWorldHi
 @mcp.tool()
 async def google_search(
     ctx: Context,
-    query: Annotated[str, Field(description="The search term or question.")],
+    query: Annotated[Union[str, List[str]], Field(description="A single search term or a list of search terms.")],
     location: Annotated[Optional[str], Field(description='The location for the search (e.g., "United States", "London, United Kingdom").')] = None,
     num_results: Annotated[Optional[int], Field(description="Number of results to return (e.g., 10, 20, default is usually 10).")] = None,
     autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection. Serper's default for this client is False if not specified.")] = None,
     time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter (e.g., "qdr:h" for past hour, "qdr:d" for past day, "qdr:w" for past week). Corresponds to the \'tbs\' parameter.')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of results to fetch (e.g., 1, 2).")] = None,
-) -> Dict[str, Any]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Performs a web search using Google (via Serper.dev).
-    This tool queries the standard Google search.
+    This tool can be used for a single query or a batch of queries.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (results may change over time due to web updates), and interacts with the open web.
 
     Returns:
-        A dictionary representing the parsed JSON response from the Serper API.
+        A dictionary for a single query or a list of dictionaries for batch queries.
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
         await ctx.info(
-            f"google_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+            f"google_search called with query(s): '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
         )
         return query_serper_api(
-            query_text=query,
+            queries=query,
             api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="search",
             location=location,
@@ -258,29 +273,29 @@ async def google_search(
 @mcp.tool()
 async def news_search(
     ctx: Context,
-    query: Annotated[str, Field(description='The news search term (e.g., "latest AI advancements", "tech earnings").')],
+    query: Annotated[Union[str, List[str]], Field(description='A single news search term or a list of search terms (e.g., "latest AI advancements", "tech earnings").')],
     location: Annotated[Optional[str], Field(description='The location for the news search (e.g., "United States").')] = None,
     num_results: Annotated[Optional[int], Field(description="Number of news articles to return.")] = None,
     autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection.")] = None,
     time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter (e.g., "qdr:h1" for past hour, "qdr:d1" for past day).')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of news results to fetch.")] = None,
-) -> Dict[str, Any]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Fetches news articles using Google News.
-    This tool queries the Google News service.
+    This tool can be used for a single query or a batch of queries.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (news results change frequently), and interacts with the open web.
 
     Returns:
-        A dictionary representing the parsed JSON response from the Serper API, typically including a 'news' key.
+        A dictionary for a single query or a list of dictionaries for batch queries.
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
         await ctx.info(
-            f"news_search called with query: '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+            f"news_search called with query(s): '{query}', location: {location}, num_results: {num_results}, autocorrect: {autocorrect}, time_period_filter: {time_period_filter}, page_number: {page_number}"
         )
         return query_serper_api(
-            query_text=query,
+            queries=query,
             api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="news",
             location=location,
@@ -304,27 +319,27 @@ async def news_search(
 @mcp.tool()
 async def scholar_search(
     ctx: Context,
-    query: Annotated[str, Field(description='The scholar search term (e.g., "quantum computing algorithms", "machine learning in healthcare").')],
+    query: Annotated[Union[str, List[str]], Field(description='A single scholar search term or a list of search terms (e.g., "quantum computing algorithms", "machine learning in healthcare").')],
     num_results: Annotated[Optional[int], Field(description="Number of scholar articles to return.")] = None,
     time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter for scholar articles (e.g., "as_ylo=2020" for articles from 2020 onwards). Corresponds to \'tbs\'.')] = None,
     page_number: Annotated[Optional[int], Field(description="The page number of scholar results to fetch.")] = None,
-) -> Dict[str, Any]:
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Fetches academic/scholar articles using Google Scholar (via Serper.dev).
-    This tool queries the Google Scholar service.
+    This tool can be used for a single query or a batch of queries.
     It relies on the SERPER_API_KEY environment variable for authentication.
     This tool is read-only, generally idempotent (results may change over time), and interacts with the open web.
 
     Returns:
-        A dictionary representing the parsed JSON response from the Serper API, typically including an 'organic' key.
+        A dictionary for a single query or a list of dictionaries for batch queries.
         In case of an error from the Serper API, a SerperApiClientError will be raised.
     """
     try:
         await ctx.info(
-            f"scholar_search called with query: '{query}', num_results: {num_results}, time_period_filter: {time_period_filter}, page_number: {page_number}"
+            f"scholar_search called with query(s): '{query}', num_results: {num_results}, time_period_filter: {time_period_filter}, page_number: {page_number}"
         )
         return query_serper_api(
-            query_text=query,
+            queries=query,
             api_key=None,  # Ensures environment variable SERPER_API_KEY is used
             search_endpoint="scholar",
             num_results=num_results,
@@ -341,6 +356,154 @@ async def scholar_search(
                 f"An unexpected error occurred in scholar_search tool: {e}"
             ) from e
         raise
+
+def _process_and_clean_results(data: Any) -> Any:
+    """
+    Recursively processes search results to truncate base64 image URLs.
+    """
+    if isinstance(data, dict):
+        # If the key 'imageUrl' exists and its value starts with 'data:image', truncate it.
+        if 'imageUrl' in data and isinstance(data['imageUrl'], str) and data['imageUrl'].startswith('data:image'):
+            data['imageUrl'] = "[Truncated base64 image data]"
+        
+        # Recursively process the rest of the dictionary
+        return {k: _process_and_clean_results(v) for k, v in data.items()}
+    
+    elif isinstance(data, list):
+        # Recursively process each item in the list
+        return [_process_and_clean_results(item) for item in data]
+        
+    else:
+        # Return the data item as is if it's not a dict or list
+        return data
+
+async def _perform_single_type_super_search(
+    ctx: Context,
+    queries: List[str],
+    search_type: Literal["search", "news", "scholar"],
+    max_related_searches: int,
+    max_depth: int,
+    location: Optional[str],
+    num_results: Optional[int],
+    autocorrect: Optional[bool],
+    time_period_filter: Optional[str],
+) -> Tuple[Dict[str, Any], int]:
+    """Helper to perform a super search for a single search type."""
+    all_results: Dict[str, Any] = {}
+    queries_to_process = list(queries)
+    processed_queries: Set[str] = set()
+
+    for depth in range(max_depth + 1):
+        if not queries_to_process:
+            break
+
+        current_queries = [q for q in queries_to_process if q not in processed_queries]
+        if not current_queries:
+            break
+
+        await ctx.info(f"Super search (type: {search_type}, depth {depth}): processing {len(current_queries)} queries: {current_queries}")
+        processed_queries.update(current_queries)
+        queries_to_process = []
+
+        try:
+            results = query_serper_api(
+                queries=current_queries,
+                api_key=None,
+                search_endpoint=search_type,
+                location=location,
+                num_results=num_results,
+                autocorrect=autocorrect,
+                time_period_filter=time_period_filter,
+            )
+            
+            # Clean the results to remove base64 image data before casting
+            cleaned_results = _process_and_clean_results(results)
+            result_list = cast(List[Dict[str, Any]], cleaned_results)
+
+            for result in result_list:
+                if not isinstance(result, dict):
+                    await ctx.warning(f"Skipping non-dict item in search results: {result}")
+                    continue
+
+                original_query = result.get("searchParameters", {}).get("q")
+                if original_query:
+                    all_results[original_query] = result
+
+                if max_related_searches > 0 and depth < max_depth:
+                    related_searches = result.get("relatedSearches", [])
+                    if isinstance(related_searches, list):
+                        for i, related in enumerate(related_searches):
+                            if i < max_related_searches:
+                                related_query = related.get("query")
+                                if related_query and related_query not in processed_queries:
+                                    queries_to_process.append(related_query)
+        except SerperApiClientError as e:
+            await ctx.error(f"Serper API error during super_search (type: {search_type}, depth {depth}): {e}")
+            break
+        except Exception as e:
+            await ctx.error(f"Unexpected error during super_search (type: {search_type}, depth {depth}): {e}")
+            break
+            
+    return all_results, len(processed_queries)
+
+
+@mcp.tool()
+async def super_search(
+    ctx: Context,
+    queries: Annotated[List[str], Field(description="A list of initial search terms or questions.")],
+    search_types: Annotated[Union[Literal["search", "news", "scholar"], List[Literal["search", "news", "scholar"]]], Field(description="A search type or a list of search types to perform.")] = "search",
+    max_related_searches: Annotated[int, Field(description="The maximum number of related searches to follow from each result set. Set to 0 to disable recursive searching.", ge=0)] = 3,
+    max_depth: Annotated[int, Field(description="The maximum recursion depth for following related searches.", ge=1, le=5)] = 1,
+    location: Annotated[Optional[str], Field(description='The location for the search (e.g., "United States", "London, United Kingdom").')] = None,
+    num_results: Annotated[Optional[int], Field(description="Number of results to return for each query (e.g., 10, 20).")] = None,
+    autocorrect: Annotated[Optional[bool], Field(description="Whether to enable or disable query autocorrection.")] = None,
+    time_period_filter: Annotated[Optional[str], Field(description='Time-based search filter (e.g., "qdr:d" for past day).')] = None,
+) -> Dict[str, Any]:
+    """
+    Performs a recursive, multi-query search using Google, News, or Scholar.
+    Can perform searches across multiple types (e.g., 'search' and 'news') in a single call.
+
+    This tool takes an initial list of queries, executes them for each specified search type,
+    and then recursively fetches results for the top related searches found in the results,
+    up to a specified depth. All results are aggregated by search type.
+    """
+    if isinstance(search_types, str):
+        search_types_list = [search_types]
+    else:
+        search_types_list = search_types
+
+    all_results: Dict[str, Any] = {}
+    total_queries_processed = 0
+
+    # Use asyncio.gather to run searches for different types concurrently
+    search_tasks = []
+    for s_type in search_types_list:
+        task = _perform_single_type_super_search(
+            ctx=ctx,
+            queries=queries,
+            search_type=cast(Literal["search", "news", "scholar"], s_type),
+            max_related_searches=max_related_searches,
+            max_depth=max_depth,
+            location=location,
+            num_results=num_results,
+            autocorrect=autocorrect,
+            time_period_filter=time_period_filter,
+        )
+        search_tasks.append(task)
+
+    try:
+        results_per_type = await asyncio.gather(*search_tasks)
+        
+        for i, (type_results, queries_processed_for_type) in enumerate(results_per_type):
+            s_type = search_types_list[i]
+            all_results[s_type] = type_results
+            total_queries_processed += queries_processed_for_type
+
+    except Exception as e:
+        await ctx.error(f"An error occurred during concurrent super_search execution: {e}")
+        # Fallback or partial results might be handled here if needed
+        
+    return {"aggregated_results": all_results, "total_queries_processed": total_queries_processed}
 
 @mcp.tool()
 async def scrape_url(
@@ -391,6 +554,254 @@ async def scrape_url(
                 f"An unexpected error occurred in scrape_url tool: {e}"
             ) from e
         raise
+
+@mcp.tool()
+async def analyze_topic(
+    ctx: Context,
+    query: Annotated[str, Field(description="The user's topic of interest (e.g., 'The impact of AI on healthcare').")],
+    search_depth: Annotated[int, Field(description="The recursion depth for the initial super_search (default: 2).", ge=1, le=5)] = 2,
+    max_urls_per_query: Annotated[int, Field(description="The number of top search results to scrape for each query (default: 3).", ge=1)] = 3,
+    search_types: Annotated[List[Literal["search", "news", "scholar"]], Field(description="A list of search types to perform.")] = ["search", "news"],
+    chunk_size: Annotated[int, Field(description="The size of text chunks for processing.", ge=100)] = 600,
+    chunk_overlap: Annotated[int, Field(description="The overlap size between text chunks.", ge=0)] = 100,
+    max_entities_per_chunk: Annotated[int, Field(description="The maximum number of entities to extract per chunk.", ge=1)] = 10,
+    allowed_entity_types: Annotated[List[str], Field(description="A list of entity types to focus on during extraction.")] = ["Person", "Organization", "Technology", "Concept", "Location"],
+) -> Dict[str, Any]:
+    """
+    Provides a comprehensive, multi-layered analysis of a given topic by dynamically building and querying a knowledge graph from web search results.
+    """
+    await ctx.info(f"Starting topic analysis for query: '{query}'")
+
+    # Phase 1: Document Collection & Ingestion
+    await ctx.info("Phase 1: Kicking off document collection with super_search.")
+    
+    # For the initial implementation, we will just call super_search and return the results
+    # to smoke test the first part of the pipeline.
+    search_results = await super_search(
+        ctx=ctx,
+        queries=[query],
+        search_types=search_types,
+        max_depth=search_depth,
+        # Limiting related searches for now to keep the initial run focused.
+        max_related_searches=2,
+    )
+
+    # Phase 2: Content Scraping
+    await ctx.info("Phase 2: Starting content scraping.")
+    
+    urls_to_scrape = set()
+    for search_type, results in search_results.get("aggregated_results", {}).items():
+        for query, result_data in results.items():
+            # Process organic results
+            for item in result_data.get("organic", []):
+                if len(urls_to_scrape) < max_urls_per_query:
+                    urls_to_scrape.add(item.get("link"))
+            # Process news results
+            for item in result_data.get("news", []):
+                if len(urls_to_scrape) < max_urls_per_query:
+                    urls_to_scrape.add(item.get("link"))
+            # Process scholar results
+            for item in result_data.get("scholar", []):
+                if len(urls_to_scrape) < max_urls_per_query:
+                    urls_to_scrape.add(item.get("link"))
+
+    await ctx.info(f"Found {len(urls_to_scrape)} unique URLs to scrape.")
+
+    scraped_content = []
+    for url in urls_to_scrape:
+        if url:
+            try:
+                content = await scrape_url(ctx, url)
+                if content:
+                    scraped_content.append({"url": url, "content": content})
+            except Exception as e:
+                await ctx.warning(f"Failed to scrape URL: {url}. Reason: {e}")
+
+    # Phase 3: Text Chunking
+    await ctx.info("Phase 3: Starting text chunking.")
+    
+    chunks = []
+    for doc in scraped_content:
+        document_text = doc.get("content", "")
+        if not document_text:
+            continue
+        
+        for i in range(0, len(document_text), chunk_size - chunk_overlap):
+            chunk_text = document_text[i:i + chunk_size]
+            chunks.append({
+                "text": chunk_text,
+                "source_url": doc.get("url")
+            })
+
+    # Phase 4: Knowledge Extraction
+    await ctx.info("Phase 4: Starting knowledge extraction.")
+    
+    try:
+        openai_client = openai.OpenAI()
+    except openai.OpenAIError as e:
+        await ctx.error(f"Error initializing OpenAI client: {e}. Please ensure your OPENAI_API_KEY is set correctly.")
+        return {"status": "Error", "message": f"OpenAI client initialization failed: {e}"}
+
+    extracted_elements = []
+    for chunk in chunks:
+        try:
+            prompt = f"""Extract entities and relationships from the following text.
+Focus on: {allowed_entity_types}
+
+Use this exact format for each relationship:
+Parsed relationship: Entity1 -> Relationship -> Entity2 [strength: X.X]
+
+Where strength is between 0.0 (very weak) and 1.0 (very strong).
+Use common relationship types: 'related to', 'depends on', 'influences', 'works for', 'located in', 'develops', 'part of'.
+
+Text: {chunk['text']}"""
+
+            response = openai_client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that extracts information from text."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            if response.choices:
+                extracted_elements.append({
+                    "source_url": chunk['source_url'],
+                    "extracted_text": response.choices[0].message.content
+                })
+        except Exception as e:
+            await ctx.warning(f"Failed to extract knowledge from chunk. Reason: {e}")
+
+    # Phase 5: Graph Construction
+    await ctx.info("Phase 5: Starting graph construction with networkx.")
+    
+    G = nx.DiGraph()
+
+    for element in extracted_elements:
+        # This is a simplified parser. A more robust version would handle
+        # variations in the LLM's output.
+        for line in element.get("extracted_text", "").split("\n"):
+            if "->" in line:
+                parts = line.split("->")
+                if len(parts) >= 2:
+                    source = parts[0].replace("Parsed relationship:", "").strip()
+                    target_part = parts[-1]
+                    
+                    relationship_match = re.search(r"(.+?)\[strength:\s*(\d\.\d)\]", target_part)
+                    if relationship_match:
+                        target = relationship_match.group(1).strip()
+                        strength = float(relationship_match.group(2))
+                        relationship = parts[1].strip() if len(parts) > 2 else "related_to"
+
+                        # Add nodes with attributes
+                        G.add_node(source, type="Unknown")
+                        G.add_node(target, type="Unknown")
+                        
+                        # Add edge with attributes
+                        G.add_edge(source, target, label=relationship, weight=strength)
+
+    # Phase 6: Graph Analysis & Centrality
+    await ctx.info("Phase 6: Starting graph analysis with networkx.")
+
+    # Calculate centrality measures
+    degree_centrality = nx.degree_centrality(G)
+    betweenness_centrality = nx.betweenness_centrality(G, weight='weight')
+    closeness_centrality = nx.closeness_centrality(G, distance='weight')
+
+    # Add centrality measures to node attributes
+    for node in G.nodes():
+        G.nodes[node]['centrality'] = {
+            "degree": degree_centrality.get(node, 0),
+            "betweenness": betweenness_centrality.get(node, 0),
+            "closeness": closeness_centrality.get(node, 0)
+        }
+
+    # Phase 7: Summarization
+    await ctx.info("Phase 7: Starting summarization.")
+
+    # Identify top N central nodes for summarization
+    sorted_nodes = sorted(G.nodes(data=True), key=lambda x: x[1]['centrality']['degree'], reverse=True)
+    
+    summaries = []
+    for node, data in sorted_nodes[:5]: # Summarize top 5 nodes
+        try:
+            # Gather context for the summary
+            connections = list(G.neighbors(node))
+            
+            prompt = f"""Based on the following information about entity '{node}':
+
+Connections: {connections}
+Centrality scores: {data['centrality']}
+
+Provide a concise 2-3 sentence summary of this entity's role and significance in the topic."""
+
+            response = openai_client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that summarizes information about entities."},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            if response.choices:
+                summaries.append({
+                    "entity": node,
+                    "summary": response.choices[0].message.content
+                })
+        except Exception as e:
+            await ctx.warning(f"Failed to summarize entity {node}. Reason: {e}")
+
+    # Phase 8: Structured Output Generation
+    await ctx.info("Phase 8: Generating structured output.")
+
+    # Convert graph to a serializable format
+    graph_data = nx.node_link_data(G)
+
+    # Get top 5 central entities
+    key_entities = []
+    for summary_data in summaries:
+        entity_name = summary_data['entity']
+        node_data = G.nodes.get(entity_name, {})
+        key_entities.append({
+            "entity": entity_name,
+            "type": node_data.get('type', 'Unknown'),
+            "centrality": node_data.get('centrality', {}),
+            "summary": summary_data.get('summary', '')
+        })
+
+    # Get top 5 relationships by weight
+    sorted_edges = sorted(G.edges(data=True), key=lambda x: x[2].get('weight', 0), reverse=True)
+    key_relationships = [
+        {
+            "source": source,
+            "target": target,
+            "label": data.get('label', 'related_to'),
+            "weight": data.get('weight', 0)
+        }
+        for source, target, data in sorted_edges[:5]
+    ]
+
+    return {
+        "query": query,
+        "processing_stats": {
+            "urls_scraped": len(scraped_content),
+            "chunks_processed": len(chunks),
+            "entities_extracted": len(G.nodes),
+            "relationships_found": len(G.edges),
+            "communities_detected": 0  # Placeholder for now
+        },
+        "key_insights": {
+            "primary_themes": [],  # Placeholder for now
+            "central_entities": key_entities,
+            "key_relationships": key_relationships,
+            "emerging_patterns": []  # Placeholder for now
+        },
+        "knowledge_graph": graph_data,
+        "sources": {
+            "search_queries": [q for r in search_results.get("aggregated_results", {}).values() for q in r.keys()],
+            "scraped_urls": [doc['url'] for doc in scraped_content],
+            "search_types_used": list(search_results.get("aggregated_results", {}).keys())
+        }
+    }
+
 
 async def print_available_tools():
     """Helper async function to print available tools."""
