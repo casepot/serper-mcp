@@ -1,6 +1,10 @@
 from dotenv import load_dotenv
+from pathlib import Path
+# --- Load Environment Variables ---
+# Explicitly load the .env file from the project root
+dotenv_path = Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=dotenv_path, override=True)
 
-load_dotenv()
 import asyncio
 import http.client
 import json
@@ -12,8 +16,15 @@ from typing import Optional, Dict, Any, Union, Literal, cast, Annotated, List, T
 
 import openai
 import networkx as nx
+import pandas as pd
 from pydantic import Field
+from splink.duckdb.linker import DuckDBLinker
+import splink.comparison_library as cl
 from fastmcp import FastMCP, Context
+
+# --- OpenAI Client ---
+# The user must have OPENAI_API_KEY set in their environment
+# for this to work.
 
 # --- Constants ---
 SERPER_GOOGLE_SEARCH_HOST = "google.serper.dev"
@@ -555,6 +566,67 @@ async def scrape_url(
             ) from e
         raise
 
+def _resolve_entities_with_splink(
+    extracted_relationships: List[Dict[str, Any]]
+) -> Dict[str, str]:
+    """
+    Uses Splink to perform entity resolution and returns a mapping from
+    original entity names to a canonical name.
+    """
+    unique_entities = set()
+    for item in extracted_relationships:
+        unique_entities.add(item['source'])
+        unique_entities.add(item['target'])
+
+    if not unique_entities:
+        return {}
+
+    # Create a DataFrame for Splink
+    df = pd.DataFrame(list(unique_entities), columns=['original_name'])
+    df['unique_id'] = range(len(df))
+
+    settings = {
+        "link_type": "dedupe_only",
+        "blocking_rules_to_generate_predictions": [],
+        "comparisons": [
+            cl.jaro_winkler_at_thresholds("original_name", [0.9, 0.8],)
+        ],
+        "retain_matching_columns": True,
+        "retain_intermediate_calculation_columns": True,
+    }
+
+    linker = DuckDBLinker(df, settings)
+    linker.estimate_u_using_random_sampling(max_pairs=1e6)
+
+    blocking_rule_for_training = "l.original_name = r.original_name"
+    linker.estimate_parameters_using_expectation_maximisation(blocking_rule_for_training)
+
+    blocking_rule_for_training = "l.original_name[1] = r.original_name[1]"
+    linker.estimate_parameters_using_expectation_maximisation(blocking_rule_for_training)
+
+    df_clusters = linker.predict_and_cluster(threshold_match_probability=0.8)
+    
+    # Process clusters to create the canonical map
+    final_mapping = {}
+    cluster_to_canonical = {}
+    
+    # Convert to dictionary for easier lookup
+    clusters_df = df_clusters.as_pandas_dataframe()
+    
+    # Find the best canonical name for each cluster_id
+    for cluster_id in clusters_df['cluster_id'].unique():
+        cluster_nodes = clusters_df[clusters_df['cluster_id'] == cluster_id]
+        # Choose the longest name as the canonical name for the cluster
+        canonical_name = max(cluster_nodes['original_name'], key=len)
+        cluster_to_canonical[cluster_id] = canonical_name
+
+    # Create the final mapping from any original name to the chosen canonical name
+    for _, row in clusters_df.iterrows():
+        final_mapping[row['original_name']] = cluster_to_canonical[row['cluster_id']]
+
+    return final_mapping
+
+
 @mcp.tool()
 async def analyze_topic(
     ctx: Context,
@@ -635,11 +707,15 @@ async def analyze_topic(
 
     # Phase 4: Knowledge Extraction
     await ctx.info("Phase 4: Starting knowledge extraction.")
+
+    if not os.getenv("OPENAI_API_KEY"):
+        await ctx.error("OPENAI_API_KEY environment variable not set.")
+        return {"status": "Error", "message": "OPENAI_API_KEY not set."}
     
     try:
         openai_client = openai.OpenAI()
     except openai.OpenAIError as e:
-        await ctx.error(f"Error initializing OpenAI client: {e}. Please ensure your OPENAI_API_KEY is set correctly.")
+        await ctx.error(f"Error initializing OpenAI client: {e}. Please ensure your OPENAI_API_KEY is valid.")
         return {"status": "Error", "message": f"OpenAI client initialization failed: {e}"}
 
     extracted_elements = []
@@ -671,14 +747,12 @@ Text: {chunk['text']}"""
         except Exception as e:
             await ctx.warning(f"Failed to extract knowledge from chunk. Reason: {e}")
 
-    # Phase 5: Graph Construction
-    await ctx.info("Phase 5: Starting graph construction with networkx.")
+    # Phase 4.5: Entity Resolution
+    await ctx.info("Phase 4.5: Starting entity resolution.")
     
-    G = nx.DiGraph()
-
+    # First, parse all extracted relationships into a flat list
+    parsed_relationships = []
     for element in extracted_elements:
-        # This is a simplified parser. A more robust version would handle
-        # variations in the LLM's output.
         for line in element.get("extracted_text", "").split("\n"):
             if "->" in line:
                 parts = line.split("->")
@@ -691,13 +765,36 @@ Text: {chunk['text']}"""
                         target = relationship_match.group(1).strip()
                         strength = float(relationship_match.group(2))
                         relationship = parts[1].strip() if len(parts) > 2 else "related_to"
+                        parsed_relationships.append({
+                            "source": source,
+                            "target": target,
+                            "relationship": relationship,
+                            "strength": strength
+                        })
 
-                        # Add nodes with attributes
-                        G.add_node(source, type="Unknown")
-                        G.add_node(target, type="Unknown")
-                        
-                        # Add edge with attributes
-                        G.add_edge(source, target, label=relationship, weight=strength)
+    canonical_entity_map = _resolve_entities_with_splink(parsed_relationships)
+    await ctx.info(f"Resolved {len(parsed_relationships)} relationships into {len(set(canonical_entity_map.values()))} canonical entities.")
+
+    # Phase 5: Graph Construction
+    await ctx.info("Phase 5: Starting graph construction with resolved entities.")
+    
+    G = nx.DiGraph()
+
+    for rel in parsed_relationships:
+        source_canonical = canonical_entity_map.get(rel['source'], rel['source'])
+        target_canonical = canonical_entity_map.get(rel['target'], rel['target'])
+
+        # Add nodes with attributes
+        G.add_node(source_canonical, type="Unknown")
+        G.add_node(target_canonical, type="Unknown")
+        
+        # Add edge with attributes
+        G.add_edge(
+            source_canonical,
+            target_canonical,
+            label=rel['relationship'],
+            weight=rel['strength']
+        )
 
     # Phase 6: Graph Analysis & Centrality
     await ctx.info("Phase 6: Starting graph analysis with networkx.")
@@ -812,20 +909,28 @@ async def print_available_tools():
 if __name__ == "__main__":
     print("Initializing SerperDevMCPServer...", flush=True)
 
-    api_key_present = os.getenv(SERPER_API_KEY_ENV_VAR)
-    if not api_key_present:
+    # Check for Serper API Key
+    serper_api_key_present = os.getenv(SERPER_API_KEY_ENV_VAR)
+    if not serper_api_key_present:
         print(
             f"WARNING: The '{SERPER_API_KEY_ENV_VAR}' environment variable is not set. Serper API calls will likely fail.",
             flush=True
         )
+    else:
+        print(f"✅ The '{SERPER_API_KEY_ENV_VAR}' environment variable is set.", flush=True)
+
+    # Check for OpenAI API Key
+    openai_api_key_present = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key_present:
         print(
-            "Please set it in your environment or in a .env file (if dotenv is used).",
+            f"WARNING: The 'OPENAI_API_KEY' environment variable is not set. OpenAI calls will fail.",
             flush=True
         )
     else:
-        print(f"The '{SERPER_API_KEY_ENV_VAR}' environment variable is set.", flush=True)
+        print("✅ The 'OPENAI_API_KEY' environment variable is set.", flush=True)
 
-    print("Fetching available tools...", flush=True)
+
+    print("\nFetching available tools...", flush=True)
     asyncio.run(print_available_tools())
 
     parser = argparse.ArgumentParser(
@@ -889,4 +994,3 @@ if __name__ == "__main__":
         print("\nServer shutdown requested by user.")
     except Exception as e:
         print(f"Failed to start server: {e}")
-
